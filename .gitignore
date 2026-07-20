@@ -1,0 +1,54 @@
+# =============================================================================
+# NorthLight — root .gitignore
+# Excludes build outputs, virtual envs, and machine-specific binaries so a fresh
+# clone rebuilds them from source (migrations + requirements.txt + package-lock +
+# Package.swift). Never commit .venv / node_modules / .build — they are large and
+# OS-specific and would break on another machine.
+# =============================================================================
+
+# --- Python backend ---
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+.python-version
+
+# --- Node dashboard --- (dashboard/.gitignore also covers its subtree)
+node_modules/
+dashboard/dist/
+dashboard/dist-ssr/
+*.local
+
+# --- Swift agent ---
+agent/.build/
+agent/*.app/
+.swiftpm/
+*.xcuserstate
+
+# --- OS / editor ---
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# --- Logs & dev artifacts ---
+*.log
+dashboard-*.png
+dash-*.png
+menubar*.png
+
+# --- Local env overrides (none required to run; localhost defaults apply) ---
+.env
+.env.*
+!.env.example
+
+# --- Personal / interview-prep files that are NOT part of the submission ---
+*.pdf
+Screenshot-*.png
+COMPLETE_MONDAY_PREP.md
+MONDAY_PREP_PLAYBOOK.md
+Parva_Challenge_Submission.md
+EMAIL_TO_SEND.txt
+.playwright-mcp/
+.claude/
+PRD.md
+CLAUDE.md

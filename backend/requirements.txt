@@ -1,0 +1,13 @@
+# NorthLight backend — pinned direct dependencies (PRD §8: intentionally minimal).
+# These are the exact versions the slice was built and verified against.
+# Install into a fresh venv:
+#   python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+# (or with uv:  uv venv && uv pip install -r requirements.txt)
+#
+# Transitive deps (starlette, anyio, uvloop, etc.) resolve automatically from
+# these four. No ORM, no auth libs, no task queue — none are needed.
+
+fastapi==0.139.2
+uvicorn[standard]==0.51.0
+psycopg[binary]==3.3.4
+pydantic==2.13.4
