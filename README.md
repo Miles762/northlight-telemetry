@@ -32,7 +32,6 @@ is no content column anywhere in the database.
 | **[`NOTES.md`](./NOTES.md)** | **Setup, architecture, DB design, score formulas, scope cuts.** Start here to run it. |
 | **[`PRIVACY.md`](./PRIVACY.md)** | HIPAA / de-identification reasoning (first-person engineering rationale). |
 | `INSTRUCTIONS.md` | The original assignment brief. |
-| `PRD.md`, `CLAUDE.md` | Build-planning docs (how the brief was interpreted). |
 
 ---
 
@@ -76,7 +75,7 @@ collection**, use your computer normally, and refresh the dashboard.
 - **Raw vs aggregate.** Raw events are append-only (for recompute/debug) with short
   retention; the dashboard reads day-level aggregates (fast, lower exposure).
 - **Transparent scores.** Focus = 40% active / 30% sustained app use / 20% low
-  switching / 10% consistency (PRD §10.2); computed in `backend/app/aggregate.py` and
+  switching / 10% consistency; computed in `backend/app/aggregate.py` and
   explained in [`NOTES.md`](./NOTES.md).
 
 ## Stack

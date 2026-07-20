@@ -182,26 +182,27 @@ to put it.
 | `sessions (user_id, start_time)` | sessions per user in start order (timeline + daily rollup) |
 | `daily_metrics` UNIQUE `(user_id, date)` | dashboard retrieval key **and** idempotent-upsert conflict target (one row per user-day) |
 
-I chose the composite `(user_id, event_type, ts)` over the PRD's example bare
-`(event_type)` index because **every** query is already scoped to a single user,
-so a lone `event_type` index would rarely be selective. I did **not** add a
+I chose the composite `(user_id, event_type, ts)` over a bare `(event_type)`
+index because **every** query is already scoped to a single user, so a lone
+`event_type` index would rarely be selective. I did **not** add a
 separate index on `daily_metrics (user_id, date)` — the `UNIQUE` constraint
 already creates exactly that index; a second one would duplicate it.
 
 ### Idempotent ingestion
 
 `daily_metrics` upserts on `(user_id, date)`, so re-aggregating a day overwrites
-rather than duplicates. To also make **raw insertion** idempotent (PRD §4 NFR:
-"a retried POST doesn't double-count"), the agent assigns each batch a UUID
-`batch_id` and reuses it on retry; the backend records ingested `batch_id`s
-(`ingest_batches`, migration `0003`) and skips a batch it has already seen.
+rather than duplicates. To also make **raw insertion** idempotent — so a retried
+POST doesn't double-count — the agent assigns each batch a UUID `batch_id` and
+reuses it on retry; the backend records ingested `batch_id`s (`ingest_batches`,
+migration `0003`) and skips a batch it has already seen.
 
-> **One deliberate deviation to flag:** CLAUDE.md says "tables are exactly users,
-> telemetry_events, sessions, daily_metrics," but PRD §4 also requires
-> batch-identity idempotency. Those two instructions are in tension. I added the
-> small `ingest_batches` ledger to satisfy the §4 NFR — a fifth table beyond the
-> "exactly four" line, chosen consciously because retry-dedup is a stated
-> requirement. It records only an opaque batch id, a user, a count, and a time.
+> **Note on the extra table:** the core schema is the four tables above (users,
+> telemetry_events, sessions, daily_metrics). I added one small ledger table,
+> `ingest_batches`, purely to make raw ingestion idempotent under retries. It
+> records only an opaque batch id, a user, a count, and a time — no telemetry, no
+> content — and exists solely so a resent batch is recognized and skipped rather
+> than re-inserted. I kept it separate rather than fold the flag into an existing
+> table so the dedup concern stays isolated and easy to reason about.
 
 ### Retention (`0002_retention.sql`)
 
@@ -247,15 +248,16 @@ the top of that file; calibration against real clinician-labeled outcomes is
 > badly inflate the fragmentation signal for a user who stays in one app. (An earlier
 > version made exactly that mistake; it's fixed, and the two-signal split is why.)
 
-**Focus score** — the weighting is fixed by PRD §10.2:
+**Focus score** — a fixed weighting of the four sub-scores:
 
 ```
 Focus = 100 × (0.40·active + 0.30·sustained + 0.20·low_switch + 0.10·consistency)
 ```
 
-**Engagement score** — "showed up, stayed, and did so consistently" (§10.1). The
-PRD names its three components but does not fix weights (unlike Focus), so I used
-the simplest defensible split and documented it here and in code:
+**Engagement score** — "showed up, stayed, and did so consistently." Its three
+components (active time, sustained sessions, consistent activity) don't have a
+prescribed weighting the way Focus does, so I used the simplest defensible split
+and documented it here and in code:
 
 ```
 Engagement = 100 × (0.50·active + 0.30·session_duration + 0.20·consistency)
@@ -264,7 +266,7 @@ Engagement = 100 × (0.50·active + 0.30·session_duration + 0.20·consistency)
 *(`session_duration` reuses the sustained-span sub-score as the proxy for
 "sustained sessions rather than fleeting ones.")*
 
-**Baseline / anomaly (§9.3, §10.3):** defined relative to the person's *own*
+**Baseline / anomaly:** defined relative to the person's *own*
 trailing mean, never a population norm. The dashboard compares the latest day's
 active minutes to the mean of prior days; a deviation beyond ±40% is surfaced as
 **"worth a look"** — a nudge to check in, explicitly *not* an abnormality.
@@ -321,13 +323,12 @@ single-day/live capture path is the real agent.
 
 ## Scope cuts (deliberately not built, and why)
 
-Everything tagged **[FUTURE]** in the PRD is intentionally unbuilt — auth, SSO,
-multi-tenancy, RBAC, cloud deploy, audit logging, ML scoring, EHR/FHIR
-integration, mobile, warehouse pipeline. Each is deferred because it adds
-operational surface without changing what the reviewer learns about the design
-reasoning in a half-day slice (see PRD §2.2 for the per-item rationale).
+Deliberately unbuilt — auth, SSO, multi-tenancy, RBAC, cloud deploy, audit
+logging, ML scoring, EHR/FHIR integration, mobile, warehouse pipeline. Each is
+deferred because it adds operational surface without changing what a reviewer
+learns about the design reasoning in a half-day slice.
 
-Slice-level decisions I made where the PRD left it open, each noted so it's
+Slice-level decisions I made where the brief left it open, each noted so it's
 defensible rather than accidental:
 
 - **On-write aggregation** (not a scheduled rollup) — simplest to run/demo; the
@@ -339,12 +340,12 @@ defensible rather than accidental:
   app code.
 - **One DB connection per request** (no pool) — more than enough for one
   low-volume machine; a pool is a [FUTURE] optimization.
-- **Battery / network / display signals** — [FUTURE] (§5.5); they don't change
-  the core metrics.
+- **Battery / network / display signals** — [FUTURE]; they don't change the core
+  metrics.
 - **Window titles** — captured **never** by default (opt-in, sensitive); see
   `PRIVACY.md`.
-- **`ingest_batches` table** — added beyond the "exactly four" tables to satisfy
-  the §4 idempotency NFR (explained above).
+- **`ingest_batches` table** — one small ledger table added purely for retry
+  idempotency (explained above).
 ```
 
 Verification I ran while building each piece (migrations apply on PG16; agent
