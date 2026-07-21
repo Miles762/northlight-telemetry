@@ -16,8 +16,12 @@ Desktop Agent (Swift)  →  FastAPI ingestion  →  PostgreSQL  →  React dashb
 The design principle throughout: **capture activity *level*, never activity
 *content*.** The agent records *that* 47 keystrokes happened in a minute — never
 *which* keys. Content exclusion is enforced in code at the point of capture
-(input monitors ignore the OS event payload and call count-only methods), and
-there is no content column anywhere in the database.
+(input monitors ignore the OS event payload and call count-only methods). There
+is no content column in the database, and the API rejects content two ways:
+unexpected fields are refused outright, and the one free-text field, `app_name`,
+is validated to be an application display name only (short, no URL/path/query
+shapes, `app_focus` events only) so content cannot ride in disguised as an app
+name.
 
 ---
 

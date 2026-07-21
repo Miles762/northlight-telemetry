@@ -1,20 +1,33 @@
 """Request/response contracts for the two endpoints (PRD §8).
 
 The ingest model is where the content-exclusion boundary is enforced on the
-server side: `model_config = extra="forbid"` means a batch carrying any field
-we did not explicitly allow (a stray "text", "keys", "url", "content"...) is
-    rejected outright (PRD §8.1: "rejects anything carrying unexpected content
-    fields"). The only text field that exists is `app_name`; there is no window
-    title, URL, text, or payload field an agent could use to smuggle content.
+server side, in two layers:
+  1. `model_config = extra="forbid"` rejects a batch carrying any field we did
+     not explicitly allow (a stray "text", "keys", "url", "content"...) -- so
+     content named as content is turned away outright.
+  2. The only free-text field, `app_name`, is validated to be *app identity
+     only* (short, no control chars, no URL/path/query shapes, and only on
+     app_focus events) -- so content cannot ride in disguised as an app name.
+Together these mean the store holds application display names and numeric
+counts/durations, and nothing content-shaped can be persisted through the API.
 """
 
 from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_EVENTS_PER_BATCH = 500
+
+# app_name is the only free-text field, so it is the one place a hostile or buggy
+# client could try to smuggle content (a URL, a window title) into the store.
+# extra="forbid" stops fields *named* url/text/content; these rules stop content
+# *shaped* like app identity from riding in through app_name. app_name carries an
+# application's display name (e.g. "Safari") -- never a URL, path, or title.
+MAX_APP_NAME_LEN = 80
+# Substrings that indicate a URL/path/query rather than an app display name.
+_CONTENT_MARKERS = ("://", "http", "www.", "/", "?", "&", "=")
 
 # The closed set of event types the agent may send (PRD §5). Anything else is a
 # 422. Keeping this an explicit Literal is the server-side counterpart to the
@@ -52,6 +65,26 @@ class EventIn(BaseModel):
     ts: datetime
     numeric_value: Optional[float] = None
     app_name: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _app_name_is_identity_only(self) -> "EventIn":
+        name = self.app_name
+        if name is None:
+            return self
+        # app_name belongs only to app_focus events. Seeing it anywhere else is a
+        # malformed/suspicious payload, not a normal agent message.
+        if self.event_type != "app_focus":
+            raise ValueError("app_name is only allowed on app_focus events")
+        if len(name) > MAX_APP_NAME_LEN:
+            raise ValueError(f"app_name exceeds {MAX_APP_NAME_LEN} chars")
+        # No control characters / newlines (an app display name has none).
+        if any(ord(ch) < 32 for ch in name):
+            raise ValueError("app_name contains control characters")
+        # No URL/path/query shapes -- those are content, not an app identity.
+        lowered = name.lower()
+        if any(marker in lowered for marker in _CONTENT_MARKERS):
+            raise ValueError("app_name looks like a URL/path, not an app name")
+        return self
 
 
 class EventsBatch(BaseModel):

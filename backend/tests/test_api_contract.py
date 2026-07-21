@@ -32,6 +32,57 @@ class ApiContractTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             EventsBatch.model_validate(payload)
 
+    def test_rejects_url_like_app_name(self):
+        # app_name is the only free-text field, so it is the one place content
+        # could be smuggled. A URL/path/query shape must be rejected.
+        ts = datetime.now(timezone.utc).isoformat()
+        for smuggled in (
+            "https://example.com/private?q=password",
+            "http://x",
+            "www.example.com",
+            "Safari/History?tab=health",
+        ):
+            payload = {
+                "batch_id": str(uuid4()),
+                "pseudonym": "subject",
+                "events": [
+                    {"event_type": "app_focus", "ts": ts, "numeric_value": 60,
+                     "app_name": smuggled}
+                ],
+            }
+            with self.assertRaises(ValidationError, msg=f"should reject {smuggled!r}"):
+                EventsBatch.model_validate(payload)
+
+    def test_rejects_app_name_on_non_focus_events(self):
+        # A plain app display name is fine on app_focus, but app_name riding on a
+        # keyboard/active/etc. event is malformed and rejected.
+        ts = datetime.now(timezone.utc).isoformat()
+        ok = EventsBatch.model_validate({
+            "batch_id": str(uuid4()), "pseudonym": "subject",
+            "events": [{"event_type": "app_focus", "ts": ts,
+                        "numeric_value": 60, "app_name": "Safari"}],
+        })
+        self.assertEqual(ok.events[0].app_name, "Safari")
+
+        payload = {
+            "batch_id": str(uuid4()), "pseudonym": "subject",
+            "events": [{"event_type": "keyboard", "ts": ts,
+                        "numeric_value": 10, "app_name": "Safari"}],
+        }
+        with self.assertRaises(ValidationError):
+            EventsBatch.model_validate(payload)
+
+    def test_rejects_overlong_or_control_char_app_name(self):
+        ts = datetime.now(timezone.utc).isoformat()
+        for bad in ("A" * 81, "Sa\nfari", "Slack\t"):
+            payload = {
+                "batch_id": str(uuid4()), "pseudonym": "subject",
+                "events": [{"event_type": "app_focus", "ts": ts,
+                            "numeric_value": 60, "app_name": bad}],
+            }
+            with self.assertRaises(ValidationError, msg=f"should reject {bad!r}"):
+                EventsBatch.model_validate(payload)
+
     def test_accepts_controlled_system_signal_types(self):
         ts = datetime.now(timezone.utc).isoformat()
         batch = EventsBatch.model_validate(

@@ -268,7 +268,12 @@ are inherently intraday views.
 
 There is **no content column anywhere** in the schema — not for keystrokes, text,
 URLs, window titles, or screen contents. The only telemetry text column is
-`app_name`. Content cannot be persisted because there is nowhere to put it.
+`app_name`, and the API validates it to be an application display name only —
+short, no control characters, no URL/path/query shapes, and permitted only on
+`app_focus` events. So the store holds app identities and numeric
+counts/durations: content named as content is rejected by the field allowlist,
+and content *shaped* like an app name is rejected by that validation, leaving
+nowhere for it to land. (See `backend/app/models.py` and its contract tests.)
 
 ### Indexes and the queries they serve
 

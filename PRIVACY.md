@@ -114,7 +114,15 @@ it's enforced *in code at the point of capture*, not by a downstream filter.
 
 The exclusion is **visible and auditable**: input monitors ignore the event
 payload and call count-only methods, and there is no content column in the
-database, so content cannot be persisted even by mistake.
+database. The one free-text field, `app_name`, is the only place content could
+be smuggled, so the API validates it to be an application display name only —
+short, no control characters, no URL/path/query shapes, and permitted only on
+`app_focus` events. Content named as content is rejected by the field allowlist
+(`extra="forbid"`); content *shaped* like an app name is rejected by that
+validation. I add window titles to the never-captured list even though the
+assignment says to capture them "if available," precisely because a title is
+content-adjacent (it routinely leaks the document, page, or subject line) — the
+one place the brief and my content boundary conflict, and I chose the boundary.
 
 ### What I'd tell a patient or clinician who asked what's recorded
 
