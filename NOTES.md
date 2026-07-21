@@ -43,11 +43,15 @@ Parva/
 - **Python 3.11+** for the backend and generator.
 - **Node 18+** for the dashboard.
 - **macOS 13+ with Swift 6 / Command Line Tools** for the agent. (No full Xcode
-  needed — see [agent notes](#4-desktop-agent-macos).)
+  needed — see [agent notes](#3a-real-data--desktop-agent-macos).)
 
-Nothing needs a `.env`. Every component reads its config from an environment
-variable **with a localhost default**, so the whole thing runs zero-config:
-Optional overrides are collected in [`.env.example`](./.env.example).
+Nothing needs a `.env`. Every component reads its config straight from an
+environment variable **with a localhost default** (`os.environ.get(...)`), so the
+whole thing runs zero-config — you never create or load a `.env` file to test it.
+The steps below just `export` the couple of vars they need inline.
+[`.env.example`](./.env.example) is a **reference card** listing all four config
+knobs and their defaults in one place; read it only if you want to change a port
+or host. It is not loaded by anything at runtime.
 
 | Component | Env var | Default |
 |---|---|---|
@@ -57,24 +61,41 @@ Optional overrides are collected in [`.env.example`](./.env.example).
 
 ---
 
-## Setup — run all four pieces
+## Setup — run the pieces in order
 
 ### 1. Database + migrations
 
+**Option A — Docker (recommended; fully self-contained).** Needs nothing
+pre-installed but Docker — it pulls Postgres and pipes the migrations *into* the
+container's built-in `psql`, so it works even with no Postgres client on your
+machine. Use this unless you already run Postgres natively:
+
 ```bash
-# Option A — Docker (self-contained):
 docker run -d --name nl_pg -p 5432:5432 \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=northlight postgres:16
+sleep 3   # let Postgres finish starting
 
-# Option B — local Postgres:
+# apply migrations in order, through the container (no host psql required):
+for f in backend/migrations/*.sql; do
+  docker exec -i nl_pg psql -U postgres -d northlight -v ON_ERROR_STOP=1 < "$f"
+done
+```
+
+**Option B — local Postgres (fallback; only if you *already* run Postgres and
+have the `psql` client).** This is not a from-scratch installer — it assumes a
+running Postgres and an existing `psql`. If you don't have those, use Option A
+instead of installing Postgres by hand:
+
+```bash
 createdb northlight
-
-# Apply the migrations in order (works for either option):
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/northlight"
 for f in backend/migrations/*.sql; do
   psql "$DATABASE_URL" -f "$f"
 done
 ```
+
+Either way you end up with five tables: `users`, `telemetry_events`, `sessions`,
+`daily_metrics`, `ingest_batches`.
 
 ### 2. Backend (FastAPI)
 
@@ -86,19 +107,18 @@ export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/northlight"
 # → http://127.0.0.1:8000/docs  (POST /events, GET /dashboard)
 ```
 
-### 3. Dashboard (React)
+### 3. Get data — choose ONE path
 
-```bash
-cd dashboard
-npm install
-npm run dev
-# → http://localhost:5173
-```
+Steps 1–2 are the same for everyone. Now put data behind the dashboard by running
+**either** the real agent (**3a**) **or** the synthetic generator (**3b**). Then
+open the dashboard **last** (step 4).
 
-If there is no data yet the dashboard says so. Get data by running the agent
-(below) or the synthetic generator (further below), then refresh.
+**Order matters:** start the dashboard *after* the backend is up and data exists.
+Opening it before the backend finishes starting is the one thing that produces the
+transient `404` in the troubleshooting note below — avoid it simply by opening the
+dashboard last, for both the real and synthetic paths.
 
-### 4. Desktop agent (macOS)
+#### 3a. Real data — desktop agent (macOS)
 
 The machine used to build this had Swift 6 Command Line Tools but **not full
 Xcode**, so the agent builds with SwiftPM and a script wraps the binary into a
@@ -123,11 +143,81 @@ Then, in the menu-bar item:
 The agent installs OS observers only after Start, buckets activity every 60 s,
 and POSTs to the backend. Pause flushes the current consented partial bucket,
 then removes the observers and clears in-memory counters. Use the computer
-normally for a few minutes, then open the dashboard.
+normally for a few minutes, then open the dashboard (step 4).
 
-### 5. Synthetic data (optional, for multi-day trends)
+#### 3b. Synthetic data — generator (optional, for multi-day trends)
 
-See [Real vs synthetic data](#real-vs-synthetic-data) below.
+Instead of the agent, backfill several days of **clearly labeled** history so the
+trend/baseline charts have something to show:
+
+```bash
+cd backend
+export BACKEND_URL="http://127.0.0.1:8000"
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/northlight"
+
+# backfill 14 synthetic days into subject 'synthetic-demo-001':
+./.venv/bin/python synthetic.py generate --days 14
+
+# remove all synthetic subjects when done (real data is never touched):
+./.venv/bin/python synthetic.py reset
+```
+
+The subject label on the dashboard starts with **`synthetic-`**, so synthetic days
+are never confusable with real capture. Why this exists, the safety guarantees, and
+per-subject reset are in [Real vs synthetic data](#real-vs-synthetic-data) below.
+
+### 4. Dashboard (React)
+
+Opening the dashboard last — after the backend (step 2) is up and data exists
+(step 3) — means it shows your data immediately. But it no longer *has* to be
+last: it connects on its own and auto-refreshes, so if you open it early it just
+waits and fills in by itself once the backend is reachable (see the note below).
+
+```bash
+cd dashboard
+npm install
+npm run dev
+# → http://localhost:5173
+```
+
+The dashboard **connects on its own** and then **auto-refreshes every 60 s**, so
+once it's open new activity (the agent sends in 60 s buckets) appears without you
+touching anything.
+
+**Order doesn't have to be perfect.** You can open the dashboard before the
+backend is up. Until the backend answers it shows a calm *"Connecting to the
+telemetry service…"* — no error, no button, no HTTP status — and it **polls in the
+background and loads itself the instant the backend is reachable** (typically
+within a second of the backend coming up). There is nothing to click. If it stays
+on that message longer than ~15 s it adds a hint to check that the backend is
+running (`uvicorn app.main:app --port 8000`), but it keeps polling and still
+recovers on its own the moment the backend appears — no refresh needed.
+
+To sanity-check the backend directly at any time:
+`curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/dashboard` should
+print `200`.
+
+### Stopping / clean slate
+
+Two pieces outlive the terminal you started them in, so closing terminals alone
+does **not** stop everything: the **Postgres container** (a Docker daemon
+process) and the **menu-bar agent** (a GUI app). Tear everything down — remove the
+database, stop the agent, backend, and dashboard — with one copyable line:
+
+```bash
+docker rm -f nl_pg 2>/dev/null; pkill -f NorthLightAgent; pkill -f "uvicorn app.main"; pkill -f vite; echo "✅ clean slate"
+```
+
+(`pkill` prints a non-zero/✗ for any piece that wasn't running — that's just
+"nothing to kill," not an error.)
+
+To wipe data **without** removing the database (keep the container and schema,
+skip re-running migrations), reset just the rows instead:
+
+```bash
+# synthetic subjects only (real data untouched):
+cd backend && ./.venv/bin/python synthetic.py reset
+```
 
 ---
 
@@ -243,6 +333,22 @@ Both scores are **transparent v1 heuristics** on a 0–100 scale, computed in
 trace every number. The reference constants below are the v1 anchors defined at
 the top of that file; calibration against real clinician-labeled outcomes is
 [FUTURE].
+
+In plain language: **Focus** answers *"how sustained and un-fragmented was the
+activity?"* (rewards being active, staying in one app rather than app-hopping, and
+spreading activity through the day); **Engagement** answers *"did the person show
+up, stay, and do so consistently?"* (rewards presence and sustained use over
+fleeting bursts).
+
+> **Expected: a short capture yields very low scores — this is correct, not a bug.**
+> Active time is normalized against a *6-hour* day (see anchors below), so a
+> one- or two-minute test capture produces single-digit Focus/Engagement (e.g.
+> `3.4` / `4.6`) — the score is faithfully reporting "almost no activity was
+> observed," not malfunctioning. A full day of real use, or synthetic backfill,
+> lands scores in realistic ranges (a 180-active-minute day scores Focus ≈ 73).
+> Likewise **"confidence" is not shown on a single day**: it is a data-sufficiency
+> label on the *baseline* card (§ below), and with fewer than two days the card
+> reads "needs at least two collected days" by design.
 
 **Component sub-scores (each normalized to 0–1):**
 
@@ -372,6 +478,40 @@ defensible rather than accidental:
 - **`ingest_batches` table** — one small ledger table added purely for retry
   idempotency (explained above).
 
+## Accessibility
+
+A clinician dashboard for a brain-health product will be read by clinicians and
+patients with visual, cognitive, attention, or motor differences, so
+accessibility is treated as a design requirement, not a polish pass. What the
+dashboard does today, and how it's checked:
+
+- **Color contrast (the primary low-vision concern) meets WCAG 2.1 AA.** Body
+  text is near-black on off-white in light mode (`#0b0b0b` on `#f9f9f7`) and
+  near-white on near-black in dark mode — both well above the 4.5:1 AA floor. The
+  palette re-resolves on OS light/dark change, so either theme stays compliant.
+- **Information is never conveyed by color alone.** Every chart carries a direct
+  text label (e.g. `Active 31%`, legend dots paired with text, tooltips), so
+  low-vision and color-blind users don't have to distinguish hues to read a value.
+- **Semantic structure for magnifiers and screen readers.** Real headings, a
+  `role="note"` on the persistent "signal, not diagnosis" disclaimer, and labeled
+  controls — no icon-only unlabeled buttons, no placeholder-as-label inputs.
+- **Two automated gates, both run in the checks below:**
+  - `npm run a11y` — fast static smoke check (labels present, roles set, no
+    icon-only unlabeled buttons).
+  - `npm run test:a11y` — builds the app, renders it in Chromium via Playwright,
+    and runs **axe-core with the `wcag2a` + `wcag2aa` rule sets**, failing on any
+    serious/critical violation (color-contrast, name/role/value, ARIA, etc.).
+    Currently **passing with zero serious/critical violations**.
+
+**Honest limit (so this isn't oversold):** automated axe testing catches roughly
+a third to a half of WCAG issues. It does **not** verify real screen-reader
+narration flow, keyboard-only navigation, or 200% zoom reflow. The next
+accessibility step I'd take is a manual screen-reader + keyboard-only pass; I
+scoped that as [FUTURE] for a half-day slice and note it here rather than imply
+full coverage.
+
+---
+
 ## Verification
 
 ```bash
@@ -380,14 +520,11 @@ cd agent && swift run NorthLightAgentCoreChecks
 cd backend && ./.venv/bin/python -m unittest discover -s tests
 cd dashboard && npm run build
 cd dashboard && npm run lint
-cd dashboard && npm run a11y
-cd dashboard && npm run test:a11y
+cd dashboard && npm run a11y        # static a11y smoke check
+cd dashboard && npm run test:a11y   # axe-core (wcag2a+2aa) on the rendered app
 ```
 
-The dashboard has two accessibility gates: `npm run a11y` is a fast static smoke
-check, and `npm run test:a11y` builds the app, serves it with Vite preview, opens
-it in Chromium via Playwright, and runs axe against the rendered dashboard. I
-also verified migrations against Postgres 16 and posted synthetic data through
-`POST /events`; `/dashboard` returned populated daily metrics, app usage,
-timeline markers, and baseline output, while the database populated derived
-`sessions` rows from the raw active events.
+Beyond the checks above, I verified migrations against Postgres 16 and posted
+synthetic data through `POST /events`; `/dashboard` returned populated daily
+metrics, app usage, timeline markers, and baseline output, while the database
+populated derived `sessions` rows from the raw active events.

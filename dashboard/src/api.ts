@@ -54,10 +54,32 @@ export interface DashboardData {
 // Backend base URL. Localhost only — the whole slice runs on one machine (§4).
 const BASE = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 
-export async function fetchDashboard(pseudonym?: string): Promise<DashboardData> {
+// A just-started backend can briefly refuse connections or 404 before its
+// routes finish registering. Rather than surface that transient startup state
+// as a hard error to a clinician, retry a few times with a short backoff; only
+// a failure that persists past that window is shown. This does not mask a real
+// outage — after the retries, the same clear error is thrown.
+export async function fetchDashboard(
+  pseudonym?: string,
+  { retries = 8, delayMs = 1000 }: { retries?: number; delayMs?: number } = {},
+): Promise<DashboardData> {
   const url = new URL("/dashboard", BASE);
   if (pseudonym) url.searchParams.set("pseudonym", pseudonym);
-  const res = await fetch(url.toString());
-  if (!res.ok) throw new Error(`GET /dashboard failed: ${res.status}`);
-  return res.json();
+
+  let lastError = "";
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url.toString());
+      if (res.ok) return res.json();
+      // 5xx / 404-while-warming-up are worth retrying; 4xx like a bad
+      // pseudonym are not — but here the only 4xx is a not-yet-ready route,
+      // so we retry those too and let the final throw report the status.
+      lastError = `GET /dashboard failed: ${res.status}`;
+    } catch (e) {
+      // fetch() throws on connection refused — the backend isn't up yet.
+      lastError = e instanceof Error ? e.message : "backend unreachable";
+    }
+    if (attempt < retries) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  throw new Error(lastError);
 }

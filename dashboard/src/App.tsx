@@ -27,14 +27,60 @@ export default function App() {
   const [pal, setPal] = useState<Palette>(() => readPalette());
 
   useEffect(() => {
-    fetchDashboard()
-      .then(setData)
-      .catch((e) => setError(String(e.message ?? e)));
+    let cancelled = false;
+    setData(null);
+    setError(null);
+
+    // The dashboard is opened by a human who may start it before the backend is
+    // ready (or in any order). Rather than fail, we POLL until the backend
+    // answers: try, and if it's unreachable, wait and try again — indefinitely.
+    // The page shows a calm "Connecting…" and then loads itself the instant the
+    // backend comes up. No button, no clicking, no patience required.
+    //
+    // After a grace window we add a soft hint (so a genuinely-down backend still
+    // tells the user what to check), but polling continues in the background even
+    // then, so it self-heals the moment the backend appears.
+    const startedAt = Date.now();
+    const GRACE_MS = 15_000;      // stay silent (just "waiting…") this long
+    const POLL_MS = 1_500;        // how often to re-check while first connecting
+    const REFRESH_MS = 60_000;    // once loaded, silently re-fetch this often
+
+    let timer: ReturnType<typeof setTimeout>;
+
+    // First-connect loop: poll fast until the backend answers, then hand off to
+    // the slow refresh cadence. After that, re-fetch every REFRESH_MS so the
+    // charts pick up new activity the agent captured (it sends 60 s buckets)
+    // without the user having to refresh the tab.
+    const tick = (loaded: boolean) => {
+      fetchDashboard(undefined, { retries: 0 })
+        .then((d) => {
+          if (cancelled) return;
+          setData(d);
+          setError(null);         // connected — clear any waiting hint
+          timer = setTimeout(() => tick(true), REFRESH_MS);  // slow auto-refresh
+        })
+        .catch(() => {
+          if (cancelled) return;
+          // A failed *auto-refresh* after we already had data is transient —
+          // keep the last good data on screen and quietly try again; never flip
+          // a working dashboard back to a waiting/error state.
+          if (!loaded && Date.now() - startedAt > GRACE_MS) {
+            setError("waiting");  // opaque flag; the UI shows a friendly hint, not this
+          }
+          timer = setTimeout(() => tick(loaded), loaded ? REFRESH_MS : POLL_MS);
+        });
+    };
+    tick(false);
+
     // Follow OS theme changes so chart colors re-resolve.
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => setPal(readPalette());
     mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      mq.removeEventListener("change", onChange);
+    };
   }, []);
 
   return (
@@ -42,8 +88,10 @@ export default function App() {
       <Header pseudonym={data?.pseudonym} />
 
       <main className="mx-auto max-w-5xl px-4 pb-16">
-        {error && <Notice text={`Could not load data: ${error}. Is the backend running on :8000?`} />}
-        {!data && !error && <Notice text="Loading…" />}
+        {/* Before the backend answers we just wait and keep polling; the page
+            loads itself the instant it's up — no button, no user action. The
+            message only gets more explicit after a grace window (error set). */}
+        {!data && <Waiting waitingLong={error !== null} />}
         {data && data.daily_metrics.length === 0 && (
           <Notice text="No telemetry yet. Start the agent (or run the synthetic generator) and refresh." />
         )}
@@ -319,6 +367,45 @@ function LegendDot({ color, label }: { color: string; label: string }) {
 function Notice({ text }: { text: string }) {
   return <div className="mt-6 text-sm rounded px-4 py-3"
               style={{ color: "var(--text-secondary)", background: "var(--surface-1)", border: "1px solid var(--border)" }}>{text}</div>;
+}
+
+// The only pre-data state. The dashboard polls the backend automatically and
+// loads itself the moment it responds — there is no Retry button and the user
+// never has to do anything. For the first few seconds it just says "waiting";
+// if the backend still hasn't answered after the grace window (waitingLong),
+// it adds a hint about starting the backend — but it keeps polling regardless,
+// so it recovers on its own as soon as the backend is up.
+function Waiting({ waitingLong }: { waitingLong: boolean }) {
+  return (
+    <div className="mt-6 text-sm rounded px-4 py-3"
+         style={{ color: "var(--text-secondary)", background: "var(--surface-1)", border: "1px solid var(--border)" }}>
+      <span className="inline-flex items-center gap-2">
+        <Spinner />
+        Connecting to the telemetry service… this loads on its own once it’s ready.
+      </span>
+      {waitingLong && (
+        <p className="mt-2 text-xs" style={{ color: "var(--text-muted)" }}>
+          Taking longer than usual. Make sure the backend is running
+          (<code>uvicorn app.main:app --port 8000</code>) — the page keeps checking
+          and will fill in by itself, no refresh needed.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Minimal CSS-only spinner (no external assets; CSP-safe).
+function Spinner() {
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "inline-block", width: 12, height: 12, borderRadius: "50%",
+        border: "2px solid var(--border)", borderTopColor: "var(--text-secondary)",
+        animation: "nl-spin 0.8s linear infinite",
+      }}
+    />
+  );
 }
 function Empty({ text }: { text: string }) {
   return <div className="py-8 text-center text-sm" style={{ color: "var(--text-muted)" }}>{text}</div>;

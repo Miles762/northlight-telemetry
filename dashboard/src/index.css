@@ -66,3 +66,8 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
+
+/* Spinner for the "waiting for backend" state (App.tsx). */
+@keyframes nl-spin {
+  to { transform: rotate(360deg); }
+}
