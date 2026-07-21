@@ -45,6 +45,7 @@ menubar*.png
 
 # --- Personal / interview-prep files that are NOT part of the submission ---
 *.pdf
+HELPER.md
 Screenshot-*.png
 COMPLETE_MONDAY_PREP.md
 MONDAY_PREP_PLAYBOOK.md
