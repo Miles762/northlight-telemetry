@@ -31,7 +31,6 @@ is no content column anywhere in the database.
 | `backend/synthetic.py` | Clearly-labeled synthetic data generator (backfills demo days). |
 | **[`NOTES.md`](./NOTES.md)** | **Setup, architecture, DB design, score formulas, scope cuts.** Start here to run it. |
 | **[`PRIVACY.md`](./PRIVACY.md)** | HIPAA / de-identification reasoning (first-person engineering rationale). |
-| `INSTRUCTIONS.md` | The original assignment brief. |
 
 ---
 
