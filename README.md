@@ -17,11 +17,13 @@ The design principle throughout: **capture activity *level*, never activity
 *content*.** The agent records *that* 47 keystrokes happened in a minute — never
 *which* keys. Content exclusion is enforced in code at the point of capture
 (input monitors ignore the OS event payload and call count-only methods). There
-is no content column in the database, and the API rejects content two ways:
-unexpected fields are refused outright, and the one free-text field, `app_name`,
-is validated to be an application display name only (short, no URL/path/query
-shapes, `app_focus` events only) so content cannot ride in disguised as an app
-name.
+is no content column in the database. As defense-in-depth the API also rejects
+content two ways: unexpected fields are refused outright, and the one free-text
+field, `app_name`, is allowlisted to the *shape* of a real app display name
+(name charset, at most a few words, no URL/domain, `app_focus` events only) so
+URLs, paths, and prose sentences are rejected. (The server can't tell a one-word
+app name from a one-word secret by inspection — the guarantee that only app
+identities arrive comes from the agent, which sends only `localizedName`.)
 
 ---
 

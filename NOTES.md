@@ -268,12 +268,16 @@ are inherently intraday views.
 
 There is **no content column anywhere** in the schema — not for keystrokes, text,
 URLs, window titles, or screen contents. The only telemetry text column is
-`app_name`, and the API validates it to be an application display name only —
-short, no control characters, no URL/path/query shapes, and permitted only on
-`app_focus` events. So the store holds app identities and numeric
-counts/durations: content named as content is rejected by the field allowlist,
-and content *shaped* like an app name is rejected by that validation, leaving
-nowhere for it to land. (See `backend/app/models.py` and its contract tests.)
+`app_name`. Content exclusion is enforced primarily **at capture** (the agent
+sends only `NSRunningApplication.localizedName`); the API adds defense-in-depth:
+content named as content is rejected by the field allowlist (`extra="forbid"`),
+and `app_name` is allowlisted to the *shape* of a real app display name — name
+charset only, at most a few words, no URL/domain, `app_focus` events only — so
+URLs, paths, and prose sentences are rejected. Honest limit: the server can't
+distinguish a one-word app name from a one-word secret by inspection, so this
+layer rejects content-*shaped* input, not every string; the guarantee that only
+app identities arrive is the agent, not the validator. (See
+`backend/app/models.py` and its contract tests.)
 
 ### Indexes and the queries they serve
 
@@ -421,6 +425,15 @@ abnormality.
 **Real captured telemetry is the source of truth and the primary demo path.**
 The synthetic generator exists only because trend/baseline charts need several
 days of history that a half-day exercise doesn't produce.
+
+`real-dashboard.png` (repo root) is the dashboard rendering **real telemetry
+captured from my own machine** — the agent built from source, Input Monitoring
+granted, **Start collection (consent)** pressed, then normal use. It shows a
+hashed subject (`c4ef7d2d…`, no `synthetic-` prefix), real focus/engagement
+scores from that session, and real foreground app names only (Code, Cursor,
+Safari, Keynote, Music, Google Chrome, TV) — no window titles, URLs, or content.
+
+![Dashboard rendering real captured telemetry from my own machine](real-dashboard.png)
 
 - **Which is which on the dashboard:** every synthetic subject's pseudonym starts
   with **`synthetic-`** (e.g. `synthetic-demo-001`). That prefix is visible in the

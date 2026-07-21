@@ -112,14 +112,24 @@ it's enforced *in code at the point of capture*, not by a downstream filter.
   the agent. A screenshot is the maximal content leak — it's simply not a
   capability the system has.
 
-The exclusion is **visible and auditable**: input monitors ignore the event
-payload and call count-only methods, and there is no content column in the
-database. The one free-text field, `app_name`, is the only place content could
-be smuggled, so the API validates it to be an application display name only —
-short, no control characters, no URL/path/query shapes, and permitted only on
-`app_focus` events. Content named as content is rejected by the field allowlist
-(`extra="forbid"`); content *shaped* like an app name is rejected by that
-validation. I add window titles to the never-captured list even though the
+The exclusion is **visible and auditable**, and it is enforced primarily **at
+capture, in the agent**: input monitors ignore the event payload and call
+count-only methods, and the foreground signal reads
+`NSRunningApplication.localizedName` — an app identity by construction. The
+server never receives content because the agent never sends it. There is no
+content column in the database.
+
+The API adds **defense-in-depth** against a hostile or buggy client. Content
+named as content is rejected by the field allowlist (`extra="forbid"`). The one
+free-text field, `app_name`, is allowlisted to the *shape* of a real app display
+name — the name character set (letters, digits, spaces, and a few marks like
+`. - & ' ( )`), at most a few words, no domain/URL shape, and only on `app_focus`
+events — so URLs, paths, and prose sentences are rejected. I want to be honest
+about the limit of this layer: the server cannot tell a one-word app name
+(`Slack`) from a one-word secret (`hunter2`) by inspection, so it rejects
+content-*shaped* input, not every conceivable string. The real guarantee that
+only app identities arrive is the agent, not this validator. I add window titles
+to the never-captured list even though the
 assignment says to capture them "if available," precisely because a title is
 content-adjacent (it routinely leaks the document, page, or subject line) — the
 one place the brief and my content boundary conflict, and I chose the boundary.
