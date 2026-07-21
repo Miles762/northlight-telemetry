@@ -1,6 +1,9 @@
 import AppKit
 import IOKit
+import IOKit.ps
 import Foundation
+import Network
+import NorthLightAgentCore
 
 // =============================================================================
 // Telemetry.swift  ·  the observers (PRD §5, §6)
@@ -19,8 +22,8 @@ import Foundation
 final class Telemetry {
 
     // --- counters drained per bucket (all just integers/durations) -----------
-    private(set) var keyboardCount = 0        // number of key events this bucket
-    private(set) var mouseCount = 0           // clicks + scrolls this bucket
+    var keyboardCount: Int { inputCounter.keyboardCount }  // number of key events this bucket
+    var mouseCount: Int { inputCounter.mouseCount }        // clicks + scrolls this bucket
     private(set) var appSwitchCount = 0       // foreground-app changes this bucket
 
     // Foreground-app focus accounting: which app has focus and since when, so we
@@ -34,19 +37,73 @@ final class Telemetry {
     // Discrete session transitions observed since last drain (lock/unlock/etc).
     private(set) var transitions: [(type: String, at: Date)] = []
 
+    // Low-risk system state signals observed since last drain: connectivity
+    // present/not-present, AC power present/not-present, battery percentage, and
+    // attached-display count. No SSID, IP, display names, serials, or content.
+    private(set) var systemEvents: [(type: String, at: Date, numericValue: Double?)] = []
+
     private var keyboardMonitor: Any?
     private var mouseMonitor: Any?
+    private var inputCounter = InputActivityCounter()
+    private var appFocusObserver: NSObjectProtocol?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var distributedObservers: [NSObjectProtocol] = []
+    private var screenObserver: NSObjectProtocol?
+    private var networkMonitor: NWPathMonitor?
+    private let networkQueue = DispatchQueue(label: "northlight.network-monitor")
+    private var latestNetworkConnected: Bool?
+    private var lastEmittedNetworkConnected: Bool?
+    private var lastEmittedPowerAC: Bool?
+    private var lastEmittedBatteryPercent: Int?
+    private var lastEmittedDisplayCount: Int?
+    private var isStarted = false
 
     // -------------------------------------------------------------------------
     // start(): install all observers.
     // -------------------------------------------------------------------------
     func start() {
+        guard !isStarted else { return }
+        resetCounters()
         installInputMonitors()
         installAppFocusObserver()
         installSystemSignalObservers()
+        installNetworkObserver()
+        installDisplayObserver()
         // Seed the initial foreground app so the first switch has a prior span.
         currentAppName = NSWorkspace.shared.frontmostApplication?.localizedName
         currentAppSince = Date()
+        isStarted = true
+    }
+
+    func stop(clearCounters: Bool) {
+        if let keyboardMonitor {
+            NSEvent.removeMonitor(keyboardMonitor)
+            self.keyboardMonitor = nil
+        }
+        if let mouseMonitor {
+            NSEvent.removeMonitor(mouseMonitor)
+            self.mouseMonitor = nil
+        }
+        if let appFocusObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(appFocusObserver)
+            self.appFocusObserver = nil
+        }
+        let ws = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers { ws.removeObserver(observer) }
+        workspaceObservers = []
+
+        let dc = DistributedNotificationCenter.default()
+        for observer in distributedObservers { dc.removeObserver(observer) }
+        distributedObservers = []
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+            self.screenObserver = nil
+        }
+        networkMonitor?.cancel()
+        networkMonitor = nil
+
+        isStarted = false
+        if clearCounters { resetCounters() }
     }
 
     // -------------------------------------------------------------------------
@@ -69,13 +126,13 @@ final class Telemetry {
         keyboardMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.keyDown]
         ) { [weak self] _ in            // `_`: the NSEvent is intentionally ignored
-            self?.keyboardCount += 1     // count only; nothing about the key is read
+            self?.inputCounter.recordKeyboardActivity()  // count only; nothing about the key is read
         }
 
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .scrollWheel]
         ) { [weak self] _ in            // `_`: coordinates/target intentionally ignored
-            self?.mouseCount += 1        // count only; no location, no target
+            self?.inputCounter.recordMouseActivity()     // count only; no location, no target
         }
     }
 
@@ -90,11 +147,10 @@ final class Telemetry {
     //   fragmentation proxy (§5.4).
     //
     // DELIBERATELY DOES NOT READ: window titles, document names, browser URLs,
-    //   or any window/screen contents. We take ONLY `localizedName`. The PRD
-    //   marks window titles opt-in and sensitive (§5.4); the default path here
-    //   never reads them, so `window_title` leaves this agent nil.
+    //   or any window/screen contents. We take ONLY `localizedName`. Window titles
+    //   are treated as content-adjacent and are not part of this agent or API.
     private func installAppFocusObserver() {
-        NSWorkspace.shared.notificationCenter.addObserver(
+        appFocusObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
         ) { [weak self] note in
@@ -131,34 +187,74 @@ final class Telemetry {
     //   what woke the machine, or any content. Each handler records only a
     //   transition type string and the time.
     //
-    // Battery/network/display signals are [FUTURE] (§5.5) and intentionally not
-    // observed here -- they don't change the core metrics.
     private func installSystemSignalObservers() {
         let ws = NSWorkspace.shared.notificationCenter
-        ws.addObserver(forName: NSWorkspace.willSleepNotification,
-                       object: nil, queue: .main) { [weak self] _ in
+        let sleep = ws.addObserver(forName: NSWorkspace.willSleepNotification,
+                                   object: nil, queue: .main) { [weak self] _ in
             self?.transitions.append((type: "sleep", at: Date()))   // time only
         }
-        ws.addObserver(forName: NSWorkspace.didWakeNotification,
-                       object: nil, queue: .main) { [weak self] _ in
+        let wake = ws.addObserver(forName: NSWorkspace.didWakeNotification,
+                                  object: nil, queue: .main) { [weak self] _ in
             self?.transitions.append((type: "wake", at: Date()))    // time only
         }
+        workspaceObservers.append(contentsOf: [sleep, wake])
 
         // Lock/unlock arrive as system-wide "distributed" notifications, not on
         // the workspace center. We observe the two names and record time only.
         let dc = DistributedNotificationCenter.default()
-        dc.addObserver(forName: .init("com.apple.screenIsLocked"),
-                       object: nil, queue: .main) { [weak self] _ in
+        let lock = dc.addObserver(forName: .init("com.apple.screenIsLocked"),
+                                  object: nil, queue: .main) { [weak self] _ in
             self?.transitions.append((type: "lock", at: Date()))
         }
-        dc.addObserver(forName: .init("com.apple.screenIsUnlocked"),
-                       object: nil, queue: .main) { [weak self] _ in
+        let unlock = dc.addObserver(forName: .init("com.apple.screenIsUnlocked"),
+                                    object: nil, queue: .main) { [weak self] _ in
             self?.transitions.append((type: "unlock", at: Date()))
+        }
+        distributedObservers.append(contentsOf: [lock, unlock])
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. NETWORK — NWPathMonitor (PRD §5.5)
+    // -------------------------------------------------------------------------
+    // OBSERVES: whether any network path is currently satisfied. DELIBERATELY
+    // DOES NOT READ: SSID, IP address, hostnames, traffic, DNS, or URLs.
+    private func installNetworkObserver() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let connected = path.status == .satisfied
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.latestNetworkConnected != connected {
+                    self.latestNetworkConnected = connected
+                    self.systemEvents.append((
+                        type: "network_connected",
+                        at: Date(),
+                        numericValue: connected ? 1 : 0
+                    ))
+                    self.lastEmittedNetworkConnected = connected
+                }
+            }
+        }
+        monitor.start(queue: networkQueue)
+        networkMonitor = monitor
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. DISPLAY — screen parameter changes (PRD §5.5)
+    // -------------------------------------------------------------------------
+    // OBSERVES: number of attached displays. DELIBERATELY DOES NOT READ: display
+    // names, serial numbers, geometry, screen contents, or screenshots.
+    private func installDisplayObserver() {
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.recordDisplayCount(Date())
         }
     }
 
     // -------------------------------------------------------------------------
-    // 4. IDLE TIME — IOKit HID system idle query (PRD §5.1)
+    // 6. IDLE TIME — IOKit HID system idle query (PRD §5.1)
     // -------------------------------------------------------------------------
     // API: IOHIDSystem's "HIDIdleTime" property, read via IORegistry.
     //
@@ -196,6 +292,7 @@ final class Telemetry {
         let appSwitchCount: Int
         let focusSpans: [(app: String, seconds: Double)]
         let transitions: [(type: String, at: Date)]
+        let systemEvents: [(type: String, at: Date, numericValue: Double?)]
         // The open app's running span, so app-usage totals include time-in-focus
         // that hasn't hit a switch yet. Name + duration only.
         let openApp: String?
@@ -203,23 +300,103 @@ final class Telemetry {
     }
 
     func drain() -> Snapshot {
-        let openSeconds = Date().timeIntervalSince(currentAppSince)
+        let now = Date()
+        recordCurrentPowerState(now)
+        recordDisplayCount(now)
+        recordCurrentNetworkStateIfNeeded(now)
+        let inputCounts = inputCounter.drain()
+        let openSeconds = now.timeIntervalSince(currentAppSince)
         let snap = Snapshot(
-            keyboardCount: keyboardCount,
-            mouseCount: mouseCount,
+            keyboardCount: inputCounts.keyboardCount,
+            mouseCount: inputCounts.mouseCount,
             appSwitchCount: appSwitchCount,
             focusSpans: focusSpans,
             transitions: transitions,
+            systemEvents: systemEvents,
             openApp: currentAppName,
             openAppSeconds: openSeconds
         )
         // Reset counters; keep currentApp/Since so the open span continues.
-        keyboardCount = 0
-        mouseCount = 0
         appSwitchCount = 0
         focusSpans = []
         transitions = []
-        currentAppSince = Date()
+        systemEvents = []
+        currentAppSince = now
         return snap
+    }
+
+    private func resetCounters() {
+        inputCounter.reset()
+        appSwitchCount = 0
+        focusSpans = []
+        transitions = []
+        systemEvents = []
+        currentAppName = nil
+        currentAppSince = Date()
+        latestNetworkConnected = nil
+        lastEmittedNetworkConnected = nil
+        lastEmittedPowerAC = nil
+        lastEmittedBatteryPercent = nil
+        lastEmittedDisplayCount = nil
+    }
+
+    private func recordCurrentNetworkStateIfNeeded(_ at: Date) {
+        guard let connected = latestNetworkConnected,
+              lastEmittedNetworkConnected != connected else { return }
+        systemEvents.append((
+            type: "network_connected",
+            at: at,
+            numericValue: connected ? 1 : 0
+        ))
+        lastEmittedNetworkConnected = connected
+    }
+
+    private func recordDisplayCount(_ at: Date) {
+        let count = NSScreen.screens.count
+        guard lastEmittedDisplayCount != count else { return }
+        systemEvents.append((type: "display_count", at: at, numericValue: Double(count)))
+        lastEmittedDisplayCount = count
+    }
+
+    private func recordCurrentPowerState(_ at: Date) {
+        let snapshot = powerSnapshot()
+        if lastEmittedPowerAC != snapshot.onAC {
+            systemEvents.append((
+                type: "power_ac",
+                at: at,
+                numericValue: snapshot.onAC ? 1 : 0
+            ))
+            lastEmittedPowerAC = snapshot.onAC
+        }
+        if let batteryPercent = snapshot.batteryPercent,
+           lastEmittedBatteryPercent != batteryPercent {
+            systemEvents.append((
+                type: "battery_percent",
+                at: at,
+                numericValue: Double(batteryPercent)
+            ))
+            lastEmittedBatteryPercent = batteryPercent
+        }
+    }
+
+    private func powerSnapshot() -> (onAC: Bool, batteryPercent: Int?) {
+        let onAC = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() != nil
+
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else {
+            return (onAC, nil)
+        }
+
+        for source in sources {
+            guard let description = IOPSGetPowerSourceDescription(info, source)?
+                    .takeUnretainedValue() as? [String: Any],
+                  let current = description[kIOPSCurrentCapacityKey] as? Int,
+                  let max = description[kIOPSMaxCapacityKey] as? Int,
+                  max > 0 else {
+                continue
+            }
+            return (onAC, Int(round((Double(current) / Double(max)) * 100.0)))
+        }
+        return (onAC, nil)
     }
 }

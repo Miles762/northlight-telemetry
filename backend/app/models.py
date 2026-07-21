@@ -3,9 +3,9 @@
 The ingest model is where the content-exclusion boundary is enforced on the
 server side: `model_config = extra="forbid"` means a batch carrying any field
 we did not explicitly allow (a stray "text", "keys", "url", "content"...) is
-rejected outright (PRD §8.1: "rejects anything carrying unexpected content
-fields"). The only text fields that exist are `app_name` and the opt-in
-`window_title` -- there is no field an agent could use to smuggle content.
+    rejected outright (PRD §8.1: "rejects anything carrying unexpected content
+    fields"). The only text field that exists is `app_name`; there is no window
+    title, URL, text, or payload field an agent could use to smuggle content.
 """
 
 from datetime import datetime
@@ -13,6 +13,8 @@ from typing import Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+MAX_EVENTS_PER_BATCH = 500
 
 # The closed set of event types the agent may send (PRD §5). Anything else is a
 # 422. Keeping this an explicit Literal is the server-side counterpart to the
@@ -29,6 +31,10 @@ EventType = Literal[
     "unlock",     # screen unlocked (session open)
     "sleep",      # machine slept (session close)
     "wake",       # machine woke (session open)
+    "power_ac",   # 1 if AC adapter/external power present, else 0
+    "battery_percent",   # current battery percentage, if available
+    "network_connected", # 1 if any network path is satisfied, else 0; no SSID/IP
+    "display_count",     # number of attached displays; no names/serials/contents
 ]
 
 
@@ -36,8 +42,8 @@ class EventIn(BaseModel):
     """A single privacy-safe observation from the agent.
 
     No content fields exist here by construction. `numeric_value` is a count or
-    a duration in seconds depending on `event_type`; `app_name`/`window_title`
-    are app/window identity only.
+    a duration in seconds depending on `event_type`; `app_name` is application
+    identity only.
     """
 
     model_config = ConfigDict(extra="forbid")  # reject unknown -> content can't sneak in
@@ -46,7 +52,6 @@ class EventIn(BaseModel):
     ts: datetime
     numeric_value: Optional[float] = None
     app_name: Optional[str] = None
-    window_title: Optional[str] = None  # opt-in, sensitive; agent leaves it None by default
 
 
 class EventsBatch(BaseModel):
@@ -60,11 +65,11 @@ class EventsBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Client-generated per batch, reused on retries. The dedup key that makes a
-    # retried POST a no-op (PRD §4 NFR; migration 0003). One id per batch, since
-    # the agent sends a batch atomically.
+    # retried POST a no-op (PRD §4 NFR; migration 0003). The event list is capped
+    # so one request cannot force an unbounded executemany() transaction.
     batch_id: UUID
     pseudonym: str = Field(min_length=1)
-    events: list[EventIn]
+    events: list[EventIn] = Field(min_length=1, max_length=MAX_EVENTS_PER_BATCH)
 
 
 class IngestResult(BaseModel):

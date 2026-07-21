@@ -28,9 +28,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/NorthLightAgent"
 
-# Info.plist: LSUIElement=1 makes it a menu-bar (agent) app with no Dock icon.
-# NS*UsageDescription strings are what macOS shows in the permission prompt --
-# they state plainly that we count input, never read it.
+# Info.plist: this local take-home build shows a normal launch window for the
+# explicit consent step. NS*UsageDescription strings are what macOS shows in the
+# permission prompt -- they state plainly that we count input, never read it.
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -45,7 +45,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key>      <string>NorthLightAgent</string>
   <key>CFBundlePackageType</key>     <string>APPL</string>
   <key>LSMinimumSystemVersion</key>  <string>13.0</string>
-  <key>LSUIElement</key>             <true/>
   <key>NSInputMonitoringUsageDescription</key>
     <string>NorthLight counts how often you use the keyboard and mouse to measure activity level. It never records which keys or characters you press.</string>
   <key>NSAppleEventsUsageDescription</key>

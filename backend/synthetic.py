@@ -106,6 +106,14 @@ def _one_day(day_start: datetime, low_activity: bool) -> list[dict]:
                    "numeric_value": random.randint(150, 900)})
     events.append({"event_type": "mouse", "ts": day_start.isoformat(),
                    "numeric_value": random.randint(80, 400)})
+    events.append({"event_type": "power_ac", "ts": day_start.isoformat(),
+                   "numeric_value": 1})
+    events.append({"event_type": "battery_percent", "ts": day_start.isoformat(),
+                   "numeric_value": random.randint(45, 100)})
+    events.append({"event_type": "network_connected", "ts": day_start.isoformat(),
+                   "numeric_value": 1})
+    events.append({"event_type": "display_count", "ts": day_start.isoformat(),
+                   "numeric_value": random.choice([1, 1, 2])})
 
     end = day_start + timedelta(hours=active_hours)
     events.append({"event_type": "idle", "ts": end.isoformat(),

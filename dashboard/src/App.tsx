@@ -58,7 +58,7 @@ export default function App() {
               <Card title="Application usage" subtitle="Time in focus by app · names only">
                 <AppUsageChart usage={data.app_usage} pal={pal} />
               </Card>
-              <Card title="Day timeline" subtitle="Active / idle spans & lock·sleep across the day">
+              <Card title="Day timeline" subtitle="Active / idle spans & system markers across the day">
                 <Timeline entries={data.timeline} />
               </Card>
               <Card title="Baseline comparison" subtitle="Latest day vs this person's own trailing mean">
@@ -186,7 +186,7 @@ function AppUsageChart({ usage, pal }: { usage: DashboardData["app_usage"]; pal:
 function Timeline({ entries }: { entries: DashboardData["timeline"] }) {
   if (!entries.length) return <Empty text="No timeline events for this day." />;
   // Coarse strip: active/idle spans sized by duration, in clock order, with
-  // lock/sleep markers. Duration + type only — no content.
+  // session/system markers. Duration/state + type only — no content.
   return (
     <div className="pt-2">
       <div className="flex w-full h-8 overflow-hidden rounded" style={{ background: "var(--grid)" }}>
@@ -197,7 +197,7 @@ function Timeline({ entries }: { entries: DashboardData["timeline"] }) {
             e.event_type === "active" ? "var(--series-1)" :
             e.event_type === "idle" ? "var(--series-idle)" : "transparent";
           if (!isSpan) {
-            return <div key={i} title={`${e.event_type} @ ${e.clock}`}
+            return <div key={i} title={`${markerTitle(e)} @ ${e.clock}`}
                         style={{ width: 3, background: "var(--serious)" }} />;
           }
           return <div key={i} title={`${e.event_type} ${Math.round(e.seconds)}s @ ${e.clock}`}
@@ -207,7 +207,7 @@ function Timeline({ entries }: { entries: DashboardData["timeline"] }) {
       <div className="flex flex-wrap gap-4 mt-3 text-xs" style={{ color: "var(--text-secondary)" }}>
         <LegendDot color="var(--series-1)" label="Active" />
         <LegendDot color="var(--series-idle)" label="Idle" />
-        <LegendDot color="var(--serious)" label="Lock / sleep marker" />
+        <LegendDot color="var(--serious)" label="Session / system marker" />
       </div>
     </div>
   );
@@ -255,21 +255,39 @@ function BaselinePanel({ data }: { data: DashboardData }) {
   const b = data.baseline;
   if (!b) return <Empty text="Baseline needs at least two collected days." />;
   const up = b.delta_active_pct >= 0;
+  const canAlert = b.confidence === "moderate" || b.confidence === "higher";
   return (
     <div className="pt-1">
-      <div className="text-3xl font-semibold" style={{ color: up ? "var(--delta-good)" : "var(--serious)" }}>
-        {up ? "▲" : "▼"} {Math.abs(b.delta_active_pct)}%
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-3xl font-semibold" style={{ color: up ? "var(--delta-good)" : "var(--serious)" }}>
+          {up ? "▲" : "▼"} {Math.abs(b.delta_active_pct)}%
+        </div>
+        <span
+          className="rounded px-2 py-1 text-xs font-medium capitalize"
+          style={{ color: "var(--text-secondary)", background: "var(--grid)" }}
+        >
+          {b.confidence} confidence
+        </span>
       </div>
       <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
         Latest active time <strong>{b.latest_active_minutes}m</strong> vs trailing mean{" "}
         <strong>{b.trailing_mean_active_minutes}m</strong> over {b.trailing_days} prior day
         {b.trailing_days === 1 ? "" : "s"}.
       </p>
+      <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
+        {b.reason}
+      </p>
+      {!canAlert && (
+        <div className="mt-3 text-sm rounded px-3 py-2"
+             style={{ color: "var(--text-secondary)", background: "color-mix(in srgb, var(--warning) 12%, transparent)", border: "1px solid var(--border)" }}>
+          More days are needed before surfacing a trend alert from passive activity data.
+        </div>
+      )}
       {b.worth_a_look && (
         <div className="mt-3 flex items-start gap-2 text-sm rounded px-3 py-2"
              style={{ color: "var(--text-primary)", background: "color-mix(in srgb, var(--serious) 14%, transparent)", border: "1px solid var(--border)" }}>
           <span aria-hidden>⚑</span>
-          <span>Worth a look — this day deviates notably from the person's own norm. A prompt to check in, not an abnormality.</span>
+          <span>Worth a look — activity differs notably from this person's own baseline. A prompt to check in, not an abnormality.</span>
         </div>
       )}
     </div>
@@ -317,3 +335,13 @@ function tooltip(pal: Palette) {
 }
 
 const fmt = (n: number | null) => (n == null ? "—" : n.toFixed(1));
+
+function markerTitle(e: DashboardData["timeline"][number]) {
+  switch (e.event_type) {
+    case "power_ac": return `AC power ${e.seconds ? "connected" : "disconnected"}`;
+    case "battery_percent": return `Battery ${Math.round(e.seconds)}%`;
+    case "network_connected": return `Network ${e.seconds ? "connected" : "disconnected"}`;
+    case "display_count": return `${Math.round(e.seconds)} display(s)`;
+    default: return e.event_type;
+  }
+}

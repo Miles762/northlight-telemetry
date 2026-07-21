@@ -16,7 +16,17 @@ export interface AppUsage {
 }
 
 export interface TimelineEntry {
-  event_type: "active" | "idle" | "lock" | "unlock" | "sleep" | "wake";
+  event_type:
+    | "active"
+    | "idle"
+    | "lock"
+    | "unlock"
+    | "sleep"
+    | "wake"
+    | "power_ac"
+    | "battery_percent"
+    | "network_connected"
+    | "display_count";
   clock: string; // "HH:MM"
   seconds: number;
 }
@@ -27,6 +37,9 @@ export interface Baseline {
   latest_active_minutes: number;
   delta_active_pct: number;
   worth_a_look: boolean;
+  confidence: "insufficient" | "low" | "moderate" | "higher";
+  alert_threshold_pct: number | null;
+  reason: string;
 }
 
 export interface DashboardData {

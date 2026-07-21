@@ -16,6 +16,8 @@ backend/.venv/
 node_modules/
 dashboard/dist/
 dashboard/dist-ssr/
+dashboard/test-results/
+dashboard/playwright-report/
 *.local
 
 # --- Swift agent ---
@@ -43,6 +45,7 @@ menubar*.png
 
 # --- Personal / interview-prep files that are NOT part of the submission ---
 *.pdf
+HELPER.md
 Screenshot-*.png
 COMPLETE_MONDAY_PREP.md
 MONDAY_PREP_PLAYBOOK.md
