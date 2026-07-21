@@ -200,10 +200,17 @@ def get_dashboard(pseudonym: str | None = None) -> dict:
         if pseudonym:
             cur.execute("SELECT id, pseudonym FROM users WHERE pseudonym = %s", (pseudonym,))
         else:
+            # No pseudonym: show the "most recently active" subject. date DESC
+            # alone is not enough -- when several subjects share the newest date
+            # (real + synthetic coexist per the PRD), a bare date sort is a tie and
+            # the engine may return an arbitrary, possibly zero-activity subject.
+            # Break the tie deterministically: latest date, then most active that
+            # day, then pseudonym -- so the default is stable and never lands on an
+            # empty subject when an active one shares the date.
             cur.execute(
                 "SELECT u.id, u.pseudonym FROM users u "
                 "JOIN daily_metrics d ON d.user_id = u.id "
-                "ORDER BY d.date DESC LIMIT 1"
+                "ORDER BY d.date DESC, d.active_minutes DESC, u.pseudonym LIMIT 1"
             )
         user = cur.fetchone()
         if not user:
