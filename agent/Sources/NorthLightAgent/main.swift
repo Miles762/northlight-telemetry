@@ -24,26 +24,103 @@ let BACKEND_URL = URL(string: ProcessInfo.processInfo.environment["NORTHLIGHT_BA
 
 final class AgentController: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
+    private var controlWindow: NSWindow?
+    private var windowStatusLabel: NSTextField?
+    private var windowBodyLabel: NSTextField?
+    private var windowToggleButton: NSButton?
     private let telemetry = Telemetry()
     private var batcher: Batcher!
     private var timer: Timer?
     private var collecting = false          // OFF until the patient consents
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu-bar-only app: no Dock icon, no main window. The status item IS
-        // the UI, which keeps the agent's presence obvious and unobtrusive.
-        NSApp.setActivationPolicy(.accessory)
+        // Keep a normal launch window for the explicit consent step. The status
+        // item remains the ongoing pause/quit control, but the reviewer/patient
+        // should not have to hunt through a crowded menu bar to find Start.
+        NSApp.setActivationPolicy(.regular)
 
         let pseudonym = Pseudonym.current()      // hashed local id; raw id stays here
         batcher = Batcher(backendURL: BACKEND_URL, pseudonym: pseudonym)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "◎ NL"        // paused glyph until started
         rebuildMenu()
+        showControlWindow()
+        refreshControls()
 
-        // Observers are installed now, but nothing is sent until the patient
-        // presses Start -- see toggleCollection().
-        telemetry.start()
+        // Observers are not installed until the patient presses Start. That keeps
+        // the consent boundary at collection time, not merely at upload time.
+    }
+
+    private func showControlWindow() {
+        if let controlWindow {
+            controlWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 300),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "NorthLight Agent"
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        let root = NSView()
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: "NorthLight Agent")
+        title.font = .boldSystemFont(ofSize: 22)
+
+        let status = NSTextField(labelWithString: "")
+        status.font = .systemFont(ofSize: 14, weight: .semibold)
+        windowStatusLabel = status
+
+        let body = NSTextField(wrappingLabelWithString: """
+        Collection is off until you press Start. NorthLight records counts, durations, app names, and coarse system state only.
+        """)
+        body.font = .systemFont(ofSize: 13)
+        windowBodyLabel = body
+
+        let boundary = NSTextField(wrappingLabelWithString: """
+        Not collected: words you type, passwords, URLs, window titles, screen contents, or screenshots.
+        """)
+        boundary.font = .systemFont(ofSize: 13)
+        boundary.textColor = .secondaryLabelColor
+
+        let toggle = NSButton(title: "", target: self, action: #selector(toggleCollection))
+        toggle.bezelStyle = .rounded
+        toggle.keyEquivalent = "\r"
+        windowToggleButton = toggle
+
+        let privacy = NSButton(title: "What is collected", target: self, action: #selector(showPrivacyInfo))
+        privacy.bezelStyle = .rounded
+
+        let buttons = NSStackView(views: [toggle, privacy])
+        buttons.orientation = .horizontal
+        buttons.spacing = 10
+
+        let stack = NSStackView(views: [title, status, body, boundary, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        root.addSubview(stack)
+        window.contentView = root
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 24),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -24),
+        ])
+
+        controlWindow = window
+        refreshControls()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // --- the menu: transparency + control (§3) -------------------------------
@@ -84,19 +161,33 @@ final class AgentController: NSObject, NSApplicationDelegate {
     @objc private func toggleCollection() {
         collecting.toggle()
         if collecting {
+            telemetry.start()
             // Begin the per-bucket drain+flush loop.
             let t = Timer(timeInterval: BUCKET_SECONDS, repeats: true) { [weak self] _ in
                 self?.tick()
             }
             RunLoop.main.add(t, forMode: .common)
             timer = t
-            statusItem.button?.title = "● NL"
         } else {
             timer?.invalidate(); timer = nil
-            batcher.flush()                  // send whatever is buffered, then stop
-            statusItem.button?.title = "◎ NL"
+            tick()                           // flush the consented partial bucket
+            telemetry.stop(clearCounters: true)
         }
+        refreshControls()
         rebuildMenu()
+    }
+
+    private func refreshControls() {
+        statusItem.button?.title = collecting ? "NorthLight: On" : "NorthLight: Paused"
+        windowStatusLabel?.stringValue = collecting
+            ? "Collecting activity signal"
+            : "Paused - not collecting"
+        windowBodyLabel?.stringValue = collecting
+            ? "Collection is on. NorthLight is recording counts, durations, app names, and coarse system state only."
+            : "Collection is off until you press Start. NorthLight records counts, durations, app names, and coarse system state only."
+        windowToggleButton?.title = collecting
+            ? "Pause collection"
+            : "Start collection (consent)"
     }
 
     // --- one bucket: drain counters, fold into events, POST ------------------
@@ -126,7 +217,10 @@ final class AgentController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() {
-        if collecting { batcher.flush() }
+        if collecting {
+            tick()
+            telemetry.stop(clearCounters: true)
+        }
         NSApp.terminate(nil)
     }
 }

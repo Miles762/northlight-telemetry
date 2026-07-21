@@ -14,13 +14,22 @@ let package = Package(
         .macOS(.v13)
     ],
     targets: [
+        .target(
+            name: "NorthLightAgentCore"
+        ),
         .executableTarget(
             name: "NorthLightAgent",
+            dependencies: ["NorthLightAgentCore"],
             // IOKit is linked for the system idle-time query (see Telemetry.swift).
             // AppKit/Foundation/CryptoKit come in via `import` and need no linker flags.
             linkerSettings: [
                 .linkedFramework("IOKit")
             ]
+        ),
+        .executableTarget(
+            name: "NorthLightAgentCoreChecks",
+            dependencies: ["NorthLightAgentCore"],
+            path: "Tests/NorthLightAgentCoreChecks"
         )
     ]
 )

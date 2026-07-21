@@ -1,9 +1,9 @@
 # NorthLight — Desktop Telemetry & Clinician Dashboard
 
 A thin, working, end-to-end slice that captures **how** a computer is used —
-counts, durations, app names — and turns it into per-day behavioral signals a
-clinician could review between visits. It **never captures what is typed, read,
-or clicked**.
+counts, durations, app names, and coarse power/network/display state — and turns
+it into per-day behavioral signals a clinician could review between visits. It
+**never captures what is typed, read, or clicked**.
 
 > **These metrics represent behavioral signals and should not be interpreted as
 > diagnoses.**
@@ -15,9 +15,9 @@ Desktop Agent (Swift)  →  FastAPI ingestion  →  PostgreSQL  →  React dashb
 
 The design principle throughout: **capture activity *level*, never activity
 *content*.** The agent records *that* 47 keystrokes happened in a minute — never
-*which* keys. Content exclusion is enforced in code at the point of capture (input
-monitors increment a counter and discard the event in the same place), and there
-is no content column anywhere in the database.
+*which* keys. Content exclusion is enforced in code at the point of capture
+(input monitors ignore the OS event payload and call count-only methods), and
+there is no content column anywhere in the database.
 
 ---
 
@@ -29,6 +29,7 @@ is no content column anywhere in the database.
 | `backend/` | FastAPI ingestion + aggregation. Exactly two endpoints; real SQL migrations. |
 | `dashboard/` | React + TypeScript + Vite + Tailwind + Recharts clinician view (read-only). |
 | `backend/synthetic.py` | Clearly-labeled synthetic data generator (backfills demo days). |
+| `agent/Tests/NorthLightAgentCoreChecks` | Lightweight SwiftPM check for count-only input state. |
 | **[`NOTES.md`](./NOTES.md)** | **Setup, architecture, DB design, score formulas, scope cuts.** Start here to run it. |
 | **[`PRIVACY.md`](./PRIVACY.md)** | HIPAA / de-identification reasoning (first-person engineering rationale). |
 | `INSTRUCTIONS.md` | The original assignment brief. |
@@ -38,7 +39,8 @@ is no content column anywhere in the database.
 ## Quick start
 
 Full instructions — including the macOS agent — are in **[`NOTES.md`](./NOTES.md)**.
-The short version (no `.env` needed; every component defaults to localhost):
+The short version (no `.env` needed; every component defaults to localhost).
+Optional overrides are listed in [`.env.example`](./.env.example):
 
 ```bash
 # 1. Database + migrations
@@ -73,10 +75,21 @@ collection**, use your computer normally, and refresh the dashboard.
   on-device install id. No name, email, or device identifier is ever stored; the raw
   id never leaves the machine.
 - **Raw vs aggregate.** Raw events are append-only (for recompute/debug) with short
-  retention; the dashboard reads day-level aggregates (fast, lower exposure).
+  retention; the dashboard uses day-level aggregates for summary/trends and
+  latest-day content-free raw rows for app usage/timeline markers.
 - **Transparent scores.** Focus = 40% active / 30% sustained app use / 20% low
   switching / 10% consistency; computed in `backend/app/aggregate.py` and
   explained in [`NOTES.md`](./NOTES.md).
+
+## Checks
+
+```bash
+cd agent && swift run NorthLightAgentCoreChecks
+cd backend && ./.venv/bin/python -m unittest discover -s tests
+cd dashboard && npm run build && npm run lint
+cd dashboard && npm run a11y
+cd dashboard && npm run test:a11y
+```
 
 ## Stack
 

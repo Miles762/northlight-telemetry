@@ -26,6 +26,8 @@ Parva/
 │   └── requirements.txt     pinned backend deps
 ├── agent/                   Swift menu-bar telemetry agent (macOS)
 │   ├── Sources/NorthLightAgent/  Pseudonym · Telemetry · Batcher · main
+│   ├── Sources/NorthLightAgentCore/ count-only input abstraction
+│   ├── Tests/NorthLightAgentCoreChecks/ lightweight SwiftPM check
 │   └── Scripts/make-app-bundle.sh
 ├── dashboard/               React + TS + Vite + Tailwind + Recharts
 │   └── src/                 api.ts · App.tsx · index.css
@@ -45,6 +47,7 @@ Parva/
 
 Nothing needs a `.env`. Every component reads its config from an environment
 variable **with a localhost default**, so the whole thing runs zero-config:
+Optional overrides are collected in [`.env.example`](./.env.example).
 
 | Component | Env var | Default |
 |---|---|---|
@@ -117,8 +120,10 @@ Then, in the menu-bar item:
    keyboard/mouse *counts* only). Grant it in System Settings → Privacy &
    Security → Input Monitoring. Session and app-focus signals work without it.
 
-The agent buckets activity every 60 s and POSTs to the backend. Use the
-computer normally for a few minutes, then open the dashboard.
+The agent installs OS observers only after Start, buckets activity every 60 s,
+and POSTs to the backend. Pause flushes the current consented partial bucket,
+then removes the observers and clears in-memory counters. Use the computer
+normally for a few minutes, then open the dashboard.
 
 ### 5. Synthetic data (optional, for multi-day trends)
 
@@ -143,13 +148,14 @@ React Dashboard              read-only clinician view; turns aggregates into cha
 ```
 
 - **Agent** is the *only* component that touches the OS, and the *only* place the
-  content-exclusion boundary is enforced (input monitors increment a counter and
-  discard the event in the same closure — visible in `Telemetry.swift`).
+  content-exclusion boundary is enforced (input monitors ignore the event payload
+  and call count-only methods — visible in `Telemetry.swift`).
 - **Backend** holds no logic beyond ingestion + aggregation retrieval. Endpoints
   are exactly `POST /events` and `GET /dashboard`.
-- **PostgreSQL** separates raw (correctness/recompute) from aggregates
-  (speed/lower exposure).
-- **Dashboard** reads almost exclusively from the day-level aggregates.
+- **PostgreSQL** separates raw (correctness/recompute), derived sessions
+  (active-span reconstruction), and aggregates (speed/lower exposure).
+- **Dashboard** reads day-level aggregates for summary/trends and reads the
+  latest day's content-free raw events only for app usage and the timeline.
 
 ---
 
@@ -162,16 +168,17 @@ Real migrations (`backend/migrations/*.sql`), not ORM models.
 | | Table(s) | Purpose | Trade-off |
 |---|---|---|---|
 | **Raw** | `telemetry_events` | append-only per-bucket observations | recompute metrics after formula changes, debug the pipeline; **higher volume, higher privacy exposure** |
-| **Derived** | `sessions` | active spans bounded by idle/lock/sleep | feed the "sustained session" score component + timeline |
+| **Derived** | `sessions` | merged active spans derived from raw `active` events | easier timeline/session reasoning; rebuildable from raw data |
 | **Aggregate** | `daily_metrics` | one row per user per day | **fast dashboard reads, lower exposure** (a day summary reveals far less than the event stream) |
 
 The core data-modeling decision: **keep raw for correctness/recompute, serve
-aggregates for speed/privacy.** The dashboard reads aggregates almost exclusively.
+aggregates for speed/privacy.** The dashboard uses aggregates for the headline
+view; latest-day app usage and timeline are derived from raw events because they
+are inherently intraday views.
 
 There is **no content column anywhere** in the schema — not for keystrokes, text,
-URLs, or screen contents. The only text columns are `app_name` and an opt-in,
-default-NULL `window_title`. Content cannot be persisted because there is nowhere
-to put it.
+URLs, window titles, or screen contents. The only telemetry text column is
+`app_name`. Content cannot be persisted because there is nowhere to put it.
 
 ### Indexes and the queries they serve
 
@@ -179,7 +186,7 @@ to put it.
 |---|---|
 | `telemetry_events (user_id, ts)` | dominant scan: one user's events in a time range, to build a day's aggregates |
 | `telemetry_events (user_id, event_type, ts)` | per-signal metrics (sum keyboard counts, count app switches) — filtered range scan, already user-scoped |
-| `sessions (user_id, start_time)` | sessions per user in start order (timeline + daily rollup) |
+| `sessions (user_id, start_time)` | sessions per user in start order for timeline/session review |
 | `daily_metrics` UNIQUE `(user_id, date)` | dashboard retrieval key **and** idempotent-upsert conflict target (one row per user-day) |
 
 I chose the composite `(user_id, event_type, ts)` over a bare `(event_type)`
@@ -195,6 +202,13 @@ rather than duplicates. To also make **raw insertion** idempotent — so a retri
 POST doesn't double-count — the agent assigns each batch a UUID `batch_id` and
 reuses it on retry; the backend records ingested `batch_id`s (`ingest_batches`,
 migration `0003`) and skips a batch it has already seen.
+
+The API also caps each ingest request at **500 events**. That keeps one POST from
+turning into an unbounded `executemany()` transaction. The agent mirrors that
+contract by flushing at most 500 events per request, retrying the same chunk with
+the same `batch_id` on failure, and bounding its local unsent buffer at 5,000
+events. If the backend stays unavailable past that local cap, the agent drops the
+oldest unsent events instead of growing memory without limit.
 
 > **Note on the extra table:** the core schema is the four tables above (users,
 > telemetry_events, sessions, daily_metrics). I added one small ledger table,
@@ -255,7 +269,7 @@ Focus = 100 × (0.40·active + 0.30·sustained + 0.20·low_switch + 0.10·consis
 ```
 
 **Engagement score** — "showed up, stayed, and did so consistently." Its three
-components (active time, sustained sessions, consistent activity) don't have a
+components (active time, sustained app spans, consistent activity) don't have a
 prescribed weighting the way Focus does, so I used the simplest defensible split
 and documented it here and in code:
 
@@ -263,13 +277,26 @@ and documented it here and in code:
 Engagement = 100 × (0.50·active + 0.30·session_duration + 0.20·consistency)
 ```
 
-*(`session_duration` reuses the sustained-span sub-score as the proxy for
-"sustained sessions rather than fleeting ones.")*
+*(`session_duration` reuses the sustained app-span sub-score as the v1 proxy for
+"sustained activity rather than fleeting interactions"; `sessions` is populated
+for review/timeline use and could become the score input in a later formula.)*
 
 **Baseline / anomaly:** defined relative to the person's *own*
 trailing mean, never a population norm. The dashboard compares the latest day's
-active minutes to the mean of prior days; a deviation beyond ±40% is surfaced as
-**"worth a look"** — a nudge to check in, explicitly *not* an abnormality.
+active minutes to the mean of prior days, but it gates alerts on data
+sufficiency:
+
+| Prior days | Confidence | Alert behavior |
+|---|---|---|
+| 1-2 | insufficient | show context only; no alert |
+| 3-6 | low | show context only; no alert |
+| 7-13 | moderate | alert only beyond ±50% |
+| 14+ | higher | alert beyond ±40% |
+
+The dashboard labels confidence and explains sparse-data cases as “more days
+needed” rather than surfacing an alarming flag. When an alert is allowed it is
+still phrased as **"worth a look"** — a nudge to check in, explicitly *not* an
+abnormality.
 
 > **Worked example (verified against the running code):** a day with 180 active
 > min, mean focus span 800 s, 3 app switches, activity across 3 hours →
@@ -292,8 +319,8 @@ days of history that a half-day exercise doesn't produce.
 - **Same pipeline:** the generator POSTs through the real `POST /events` endpoint
   with full validation — no privileged insert path. Generating data also
   exercises the real ingestion + aggregation.
-- **Privacy-safe:** it emits only the same count/duration/app-name shapes the
-  agent does. No content.
+- **Privacy-safe:** it emits only the same count/duration/app-name/system-state
+  shapes the agent does. No content.
 
 ```bash
 cd backend
@@ -340,15 +367,27 @@ defensible rather than accidental:
   app code.
 - **One DB connection per request** (no pool) — more than enough for one
   low-volume machine; a pool is a [FUTURE] optimization.
-- **Battery / network / display signals** — [FUTURE]; they don't change the core
-  metrics.
-- **Window titles** — captured **never** by default (opt-in, sensitive); see
+- **Window titles** — captured **never** and rejected by the backend contract; see
   `PRIVACY.md`.
 - **`ingest_batches` table** — one small ledger table added purely for retry
   idempotency (explained above).
+
+## Verification
+
+```bash
+cd agent && swift build -c release
+cd agent && swift run NorthLightAgentCoreChecks
+cd backend && ./.venv/bin/python -m unittest discover -s tests
+cd dashboard && npm run build
+cd dashboard && npm run lint
+cd dashboard && npm run a11y
+cd dashboard && npm run test:a11y
 ```
 
-Verification I ran while building each piece (migrations apply on PG16; agent
-wire format POSTs 200 and produces correct scores; dashboard renders in light +
-dark against live data; synthetic generate/reset scope correctly) is described
-inline in the relevant sections above.
+The dashboard has two accessibility gates: `npm run a11y` is a fast static smoke
+check, and `npm run test:a11y` builds the app, serves it with Vite preview, opens
+it in Chromium via Playwright, and runs axe against the rendered dashboard. I
+also verified migrations against Postgres 16 and posted synthetic data through
+`POST /events`; `/dashboard` returned populated daily metrics, app usage,
+timeline markers, and baseline output, while the database populated derived
+`sessions` rows from the raw active events.

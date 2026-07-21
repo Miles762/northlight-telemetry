@@ -10,7 +10,7 @@
 --
 -- Privacy invariant enforced by the schema (PRD §1, §5): we store counts,
 -- durations, app names, and switch counts -- NEVER content. There is no column
--- anywhere in this schema for keystrokes, characters, text, URLs, clipboard,
+-- anywhere in this schema for keystrokes, characters, text, URLs, window titles, clipboard,
 -- or screen contents. The absence of those columns is a deliberate, reviewable
 -- part of the design: content cannot be persisted because there is nowhere to
 -- put it.
@@ -49,7 +49,7 @@ CREATE TABLE users (
 -- -----------------------------------------------------------------------------
 -- The high-volume, higher-exposure table. Every row is a single privacy-safe
 -- observation the agent made: a bucketed input count, an app-focus change, a
--- lock/unlock, a sleep/wake. Kept append-only so metrics can be recomputed
+-- lock/unlock, a sleep/wake, or a coarse system state. Kept append-only so metrics can be recomputed
 -- from source when a formula changes, and so the pipeline can be debugged
 -- (PRD §7.2). Shortest retention of any table (PRD §7.4): most sensitive data,
 -- shortest life.
@@ -57,21 +57,19 @@ CREATE TABLE users (
 -- Column semantics:
 --   event_type    Discriminator for the row. Application-level enum kept as
 --                 TEXT for migration simplicity -- one of:
---                 'keyboard' | 'mouse' | 'app_focus' | 'lock' | 'unlock' |
---                 'sleep' | 'wake' | 'idle' | 'active'. A CHECK constraint is
+--                 'keyboard' | 'mouse' | 'app_focus' | 'app_switch' | 'lock' |
+--                 'unlock' | 'sleep' | 'wake' | 'idle' | 'active' |
+--                 'power_ac' | 'battery_percent' | 'network_connected' |
+--                 'display_count'. A CHECK constraint is
 --                 intentionally omitted so the agent can add signal types
 --                 without a migration; the backend validates event_type on
 --                 ingest (PRD §8.1) and rejects anything carrying unexpected
 --                 content fields.
 --   app_name      Foreground application name (e.g. "Safari"). NULL for
 --                 non-app events. App name only -- coarse shape of the day.
---   window_title  Opt-in, treated as sensitive (PRD §5.4). NULL by default;
---                 the agent captures app name only unless a title is
---                 demonstrably non-sensitive. Present as a nullable column so
---                 the opt-in path exists, but the default data path leaves it
---                 NULL.
 --   numeric_value A count (keystrokes, clicks, scrolls, switches) OR a
---                 duration in seconds, depending on event_type. One numeric
+--                 duration in seconds, or a controlled system-state number
+--                 depending on event_type. One numeric
 --                 column instead of many keeps the raw table thin; the meaning
 --                 is fixed per event_type and documented at the aggregation
 --                 layer.
@@ -79,15 +77,14 @@ CREATE TABLE users (
 --                 as TIMESTAMPTZ (UTC). Drives every time-range scan.
 --
 -- Note there is NO content column and NO free-text payload column. That is the
--- point: the only text columns are app_name and the opt-in window_title, both
--- bounded to application/window identity, never to what was typed or viewed.
+-- point: the only text column is app_name, bounded to application identity,
+-- never to what was typed, viewed, or opened.
 -- -----------------------------------------------------------------------------
 CREATE TABLE telemetry_events (
     id            BIGSERIAL PRIMARY KEY,
     user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    event_type    TEXT NOT NULL,                -- 'keyboard'|'mouse'|'app_focus'|'lock'|'unlock'|'sleep'|'wake'|'idle'|'active'
+    event_type    TEXT NOT NULL,                -- validated in backend/app/models.py
     app_name      TEXT,                         -- nullable; app-focus events only; app name, never content
-    window_title  TEXT,                         -- nullable; opt-in, sensitive; NULL by default
     numeric_value NUMERIC,                       -- count OR duration-seconds, per event_type
     ts            TIMESTAMPTZ NOT NULL
 );
@@ -110,12 +107,11 @@ CREATE INDEX idx_telemetry_events_user_type_ts
 -- -----------------------------------------------------------------------------
 -- sessions  ·  derived active spans
 -- -----------------------------------------------------------------------------
--- A session is an active span bounded by idle/lock/sleep transitions observed
--- in telemetry_events (PRD §7.1, §10.1). Derived, not raw: the backend opens a
--- session on wake/unlock/active and closes it on idle/lock/sleep. end_time and
--- duration_sec are NULL while a session is still open, then filled on close.
--- Sessions feed the "sustained session" component of the engagement/focus
--- scores and the activity timeline.
+-- A session is an active span derived from active-duration telemetry rows
+-- (PRD §7.1, §10.1). The backend rebuilds a day's sessions from raw events when
+-- new batches arrive, merging adjacent active spans separated by less than the
+-- idle-gap threshold. Derived, not raw: these rows can be deleted and rebuilt
+-- from telemetry_events whenever the sessionization rule changes.
 -- -----------------------------------------------------------------------------
 CREATE TABLE sessions (
     id            BIGSERIAL PRIMARY KEY,

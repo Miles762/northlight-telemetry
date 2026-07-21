@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "a11y": "node scripts/a11y-smoke.mjs",
+    "test:a11y": "npm run build && playwright test",
     "lint": "oxlint",
     "preview": "vite preview"
   },
@@ -15,6 +17,8 @@
     "recharts": "^3.10.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

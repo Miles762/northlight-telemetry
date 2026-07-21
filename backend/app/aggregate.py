@@ -19,7 +19,7 @@ Focus score -- weighted heuristic exactly per PRD §10.2:
 
 Engagement score -- per PRD §10.1 ("showed up, stayed, and did so consistently"):
     50%  active time        -- how much of the day was active
-    30%  session duration   -- presence of sustained sessions, not just fleeting
+    30%  sustained activity -- presence of sustained app-focus spans, not just fleeting
     20%  consistent activity -- spread across the day vs a single burst
 (The engagement weights are not fixed by the PRD the way Focus's are; these are
 the simplest defensible split of the three named components and are documented
@@ -33,7 +33,7 @@ v1 guesses; §10 explicitly calls future calibration [FUTURE].
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 # --- Reference constants (v1, transparent, calibration is [FUTURE] per §10) ---
 
@@ -56,6 +56,14 @@ CONSISTENT_HOURS_TARGET = 8
 # Idle gap (seconds) that closes a session. Matches the agent's idle threshold;
 # used when deriving sessions from active/idle/lock/sleep transitions.
 SESSION_IDLE_GAP_SECONDS = 5 * 60
+
+# Baseline confidence gates. Sparse passive telemetry should not create alarming
+# output just because one day differs from one or two prior days.
+LOW_CONFIDENCE_PRIOR_DAYS = 3
+MODERATE_CONFIDENCE_PRIOR_DAYS = 7
+HIGHER_CONFIDENCE_PRIOR_DAYS = 14
+MODERATE_ALERT_DELTA_PCT = 50.0
+HIGHER_ALERT_DELTA_PCT = 40.0
 
 
 def _clamp01(x: float) -> float:
@@ -86,6 +94,14 @@ def _local_day(ts: datetime) -> date:
     return ts.astimezone(timezone.utc).date()
 
 
+def _as_utc_datetime(ts) -> datetime:
+    if isinstance(ts, str):
+        ts = datetime.fromisoformat(ts)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
 def compute_daily_metrics(events: list[dict]) -> dict:
     """Compute one daily_metrics row's fields from a single day's events.
 
@@ -107,6 +123,7 @@ def compute_daily_metrics(events: list[dict]) -> dict:
     )
     active_minutes = int(round(active_seconds / 60))
     idle_minutes = int(round(idle_seconds / 60))
+    has_activity = active_seconds > 0
 
     # --- 2. App switches & sustained focus spans -----------------------------
     # App-switch count comes from dedicated 'app_switch' events, which carry the
@@ -133,22 +150,25 @@ def compute_daily_metrics(events: list[dict]) -> dict:
     s_active = _clamp01(active_minutes / FULL_ACTIVE_MINUTES)
 
     # 3b. Sustained-use sub-score: mean unbroken focus span vs the anchor.
-    s_sustained = _clamp01(mean_focus_span / SUSTAINED_FOCUS_SECONDS)
+    s_sustained = _clamp01(mean_focus_span / SUSTAINED_FOCUS_SECONDS) if has_activity else 0.0
 
     # 3c. Low-switching sub-score: fewer switches per active hour = higher.
-    active_hours = max(active_minutes / 60, 1e-9)  # avoid /0; tiny floor
-    switches_per_hour = app_switch_count / active_hours
-    s_low_switch = _clamp01(1.0 - switches_per_hour / SWITCHES_PER_HOUR_CEILING)
+    if has_activity:
+        active_hours = max(active_minutes / 60, 1e-9)  # avoid /0; tiny floor
+        switches_per_hour = app_switch_count / active_hours
+        s_low_switch = _clamp01(1.0 - switches_per_hour / SWITCHES_PER_HOUR_CEILING)
+    else:
+        s_low_switch = 0.0
 
     # 3d. Consistency sub-score: how many distinct hours-of-day saw activity.
     active_hours_of_day = {
         _hour_of(e["ts"]) for e in events
         if e["event_type"] in ("keyboard", "mouse", "active", "app_focus")
     }
-    s_consistency = _clamp01(len(active_hours_of_day) / CONSISTENT_HOURS_TARGET)
+    s_consistency = _clamp01(len(active_hours_of_day) / CONSISTENT_HOURS_TARGET) if has_activity else 0.0
 
-    # 3e. Session-duration sub-score (for engagement): reuse mean focus span as a
-    # proxy for "sustained sessions" -- longer typical spans => more sustained.
+    # 3e. Sustained-activity sub-score (for engagement): reuse mean focus span as
+    # a proxy for "sustained activity" -- longer typical spans => more sustained.
     s_session = s_sustained
 
     # --- 4. Weighted scores (0..100) ----------------------------------------
@@ -188,3 +208,111 @@ def _hour_of(ts) -> int:
 def days_touched(events: list[dict]) -> set[date]:
     """The set of calendar days any event in the batch falls on."""
     return {_local_day(e["ts"]) for e in events}
+
+
+def compute_sessions(events: list[dict]) -> list[dict]:
+    """Derive merged active spans from active-duration events.
+
+    `active` rows carry a span start timestamp and duration seconds. Adjacent
+    active rows separated by less than SESSION_IDLE_GAP_SECONDS are one session;
+    larger gaps create separate sessions. This keeps `sessions` derived and
+    rebuildable from raw telemetry instead of becoming a second source of truth.
+    """
+    active_spans = []
+    for event in events:
+        if event["event_type"] != "active":
+            continue
+        duration_sec = int(round(_num(event["numeric_value"])))
+        if duration_sec <= 0:
+            continue
+        start = _as_utc_datetime(event["ts"])
+        end = start + timedelta(seconds=duration_sec)
+        active_spans.append((start, end))
+
+    sessions: list[dict] = []
+    for start, end in sorted(active_spans):
+        if not sessions:
+            sessions.append({"start_time": start, "end_time": end})
+            continue
+
+        previous = sessions[-1]
+        gap = (start - previous["end_time"]).total_seconds()
+        if gap <= SESSION_IDLE_GAP_SECONDS:
+            previous["end_time"] = max(previous["end_time"], end)
+        else:
+            sessions.append({"start_time": start, "end_time": end})
+
+    return [
+        {
+            "start_time": session["start_time"],
+            "end_time": session["end_time"],
+            "duration_sec": int(round(
+                (session["end_time"] - session["start_time"]).total_seconds()
+            )),
+        }
+        for session in sessions
+    ]
+
+
+def compute_baseline(daily: list[dict]) -> dict | None:
+    """Latest-day active time vs prior days, with sparse-data alert gating.
+
+    The dashboard should be allowed to show context early, but not to alarm on a
+    thin baseline. Confidence is based only on the amount of prior same-person
+    history behind the comparison:
+      - 1-2 prior days: insufficient, no alert
+      - 3-6 prior days: low, no alert
+      - 7-13 prior days: moderate, alert only beyond 50%
+      - 14+ prior days: higher, alert beyond 40%
+    """
+    if len(daily) < 2:
+        return None
+
+    prior = daily[:-1]
+    trailing_days = len(prior)
+    mean_active = sum(d["active_minutes"] for d in prior) / trailing_days
+    latest_active = daily[-1]["active_minutes"]
+    delta_pct = (
+        100.0 * (latest_active - mean_active) / mean_active
+        if mean_active else 0.0
+    )
+
+    confidence, threshold, reason = _baseline_confidence(trailing_days)
+    worth_a_look = threshold is not None and abs(delta_pct) > threshold
+
+    return {
+        "trailing_days": trailing_days,
+        "trailing_mean_active_minutes": round(mean_active, 1),
+        "latest_active_minutes": latest_active,
+        "delta_active_pct": round(delta_pct, 1),
+        "worth_a_look": worth_a_look,
+        "confidence": confidence,
+        "alert_threshold_pct": threshold,
+        "reason": reason,
+    }
+
+
+def _baseline_confidence(trailing_days: int) -> tuple[str, float | None, str]:
+    if trailing_days < LOW_CONFIDENCE_PRIOR_DAYS:
+        return (
+            "insufficient",
+            None,
+            "Needs at least 3 prior days before judging whether this differs from baseline.",
+        )
+    if trailing_days < MODERATE_CONFIDENCE_PRIOR_DAYS:
+        return (
+            "low",
+            None,
+            "Needs at least 7 prior days before surfacing a trend alert.",
+        )
+    if trailing_days < HIGHER_CONFIDENCE_PRIOR_DAYS:
+        return (
+            "moderate",
+            MODERATE_ALERT_DELTA_PCT,
+            "Moderate confidence from at least 7 prior days; alert threshold is 50%.",
+        )
+    return (
+        "higher",
+        HIGHER_ALERT_DELTA_PCT,
+        "Higher confidence from at least 14 prior days; alert threshold is 40%.",
+    )

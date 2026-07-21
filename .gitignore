@@ -16,6 +16,8 @@ backend/.venv/
 node_modules/
 dashboard/dist/
 dashboard/dist-ssr/
+dashboard/test-results/
+dashboard/playwright-report/
 *.local
 
 # --- Swift agent ---

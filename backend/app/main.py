@@ -53,12 +53,12 @@ def _get_or_create_user(cur, pseudonym: str) -> str:
 
 
 def _recompute_day(cur, user_id: str, day: date) -> None:
-    """Recompute one day's daily_metrics from raw events and upsert it.
+    """Recompute one day's derived sessions and daily_metrics from raw events.
 
     This is the on-write aggregation path (PRD §8.3): after inserting a batch we
-    re-read that day's raw events and rebuild the aggregate from scratch, so the
-    result is identical whether events arrived in one batch or many. Upsert keyed
-    on (user_id, date) -- the UNIQUE constraint makes re-runs idempotent.
+    re-read that day's raw events and rebuild derived rows from scratch, so the
+    result is identical whether events arrived in one batch or many. daily_metrics
+    upserts on (user_id, date), and sessions are delete/reinsert for the day.
     """
     cur.execute(
         "SELECT event_type, app_name, numeric_value, ts "
@@ -69,6 +69,26 @@ def _recompute_day(cur, user_id: str, day: date) -> None:
     )
     rows = cur.fetchall()
     m = aggregate.compute_daily_metrics(rows)
+    sessions = aggregate.compute_sessions(rows)
+
+    cur.execute(
+        "DELETE FROM sessions WHERE user_id = %s AND start_time::date = %s",
+        (user_id, day),
+    )
+    if sessions:
+        cur.executemany(
+            "INSERT INTO sessions (user_id, start_time, end_time, duration_sec) "
+            "VALUES (%s, %s, %s, %s)",
+            [
+                (
+                    user_id,
+                    session["start_time"],
+                    session["end_time"],
+                    session["duration_sec"],
+                )
+                for session in sessions
+            ],
+        )
 
     cur.execute(
         """
@@ -115,7 +135,7 @@ def ingest_events(batch: EventsBatch) -> IngestResult:
         seen = cur.fetchone()
         if seen:
             return IngestResult(
-                inserted_events=seen["event_count"],
+                inserted_events=0,
                 days_aggregated=[],  # already aggregated on the original request
             )
 
@@ -123,12 +143,11 @@ def ingest_events(batch: EventsBatch) -> IngestResult:
         # every value is bound, never interpolated (parameterized SQL, §4).
         cur.executemany(
             "INSERT INTO telemetry_events "
-            "(user_id, event_type, app_name, window_title, numeric_value, ts) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
+            "(user_id, event_type, app_name, numeric_value, ts) "
+            "VALUES (%s, %s, %s, %s, %s)",
             [
                 (
-                    user_id, e.event_type, e.app_name, e.window_title,
-                    e.numeric_value, e.ts,
+                    user_id, e.event_type, e.app_name, e.numeric_value, e.ts,
                 )
                 for e in batch.events
             ],
@@ -162,8 +181,9 @@ def ingest_events(batch: EventsBatch) -> IngestResult:
 def get_dashboard(pseudonym: str | None = None) -> dict:
     """Return the aggregates the clinician dashboard renders (PRD §8.2, §9).
 
-    Reads almost exclusively from daily_metrics (the low-exposure aggregate).
-    For the single-user slice, pseudonym is optional -- if omitted we return the
+    Reads daily_metrics for summary/trends and latest-day raw, content-free rows
+    for app usage and timeline markers. For the single-user slice, pseudonym is
+    optional -- if omitted we return the
     most recently active user. Shape:
         {
           "pseudonym": str,
@@ -172,7 +192,7 @@ def get_dashboard(pseudonym: str | None = None) -> dict:
           "summary":  <latest day's row or null>,
           "app_usage": [ {app_name, minutes} ],   # latest day, app-name only
           "timeline":  [ {event_type, clock, seconds} ],  # latest day, intraday
-          "baseline": {trailing_mean_active, delta_active_pct, ...}
+          "baseline": {trailing_mean_active, delta_active_pct, confidence, ...}
         }
     """
     with get_conn() as conn, conn.cursor() as cur:
@@ -223,9 +243,10 @@ def get_dashboard(pseudonym: str | None = None) -> dict:
                          for r in cur.fetchall()]
 
         # Intraday timeline for the latest day (PRD §9.2): the raw session-shape
-        # events across the day -- active/idle spans and lock/sleep/wake/unlock
-        # transitions -- so the dashboard can draw the day's rhythm. Still no
-        # content: each row is a type, a timestamp, and (for spans) a duration.
+        # events across the day -- active/idle spans, lock/sleep/wake/unlock
+        # transitions, and coarse system-state markers -- so the dashboard can draw
+        # the day's rhythm. Still no content: each row is a type, a timestamp, and
+        # a controlled number.
         timeline = []
         if summary:
             cur.execute(
@@ -235,7 +256,9 @@ def get_dashboard(pseudonym: str | None = None) -> dict:
                 "FROM telemetry_events "
                 "WHERE user_id = %s AND ts::date = %s "
                 "      AND event_type IN "
-                "          ('active','idle','lock','unlock','sleep','wake') "
+                "          ('active','idle','lock','unlock','sleep','wake', "
+                "           'power_ac','battery_percent','network_connected', "
+                "           'display_count') "
                 "ORDER BY ts",
                 (user_id, summary["date"]),
             )
@@ -248,24 +271,7 @@ def get_dashboard(pseudonym: str | None = None) -> dict:
         # Baseline comparison (PRD §9.3, §10.3): latest day's active minutes vs
         # the trailing mean of prior days -- relative to the person's OWN norm,
         # never a population norm.
-        baseline = None
-        if len(daily) >= 2:
-            prior = daily[:-1]
-            mean_active = sum(d["active_minutes"] for d in prior) / len(prior)
-            latest_active = summary["active_minutes"]
-            delta_pct = (
-                100.0 * (latest_active - mean_active) / mean_active
-                if mean_active else 0.0
-            )
-            baseline = {
-                "trailing_days": len(prior),
-                "trailing_mean_active_minutes": round(mean_active, 1),
-                "latest_active_minutes": latest_active,
-                "delta_active_pct": round(delta_pct, 1),
-                # "worth a look" if today deviates > 40% from own baseline --
-                # framed as a nudge, not an abnormality (PRD §9.3).
-                "worth_a_look": abs(delta_pct) > 40.0,
-            }
+        baseline = aggregate.compute_baseline(daily)
 
     return {
         "pseudonym": user["pseudonym"],

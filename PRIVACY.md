@@ -24,25 +24,25 @@ on its own: a specific therapy app, a psychiatric-medication tracker, a
 bankruptcy-filing tool, a dating app. Knowing someone spent three hours in a
 particular named app can be revealing even with no other data. I keep app names
 because the clinical value (see §3) is real, but I treat them as sensitive: they
-live in raw events with the shortest retention, and the dashboard only ever shows
-*aggregate time-in-app*, never a raw timeline of app switches.
+live in raw events with the shortest retention, and the dashboard shows
+aggregate time-in-app rather than a raw switch-by-switch app sequence.
 
-### Window titles — *NOT collected by default; the highest-risk field*
+### Window titles — *not collected; the highest-risk field*
 Window titles are where privacy goes to die. "Re: layoffs — confidential.docx",
 "HIV test results", a browser tab title that is literally the page's headline —
 titles routinely **leak content**, which is exactly the thing I promised never to
-capture. So this is the field I'm strictest about. In the schema `window_title`
-exists as a nullable, opt-in column, and **the agent never populates it** — it
-reads only the app's `localizedName`. The column exists so a future, carefully
-gated opt-in path *could* exist, but the default and only data path leaves it
-NULL. If I had to cut one thing to reduce risk, it would already be cut.
+capture. So this is the field I'm strictest about: there is no `window_title`
+field in the API contract or database schema, and **the agent never reads it**.
+It reads only the app's `localizedName`. If I had to cut one thing to reduce
+risk, it would already be cut.
 
 ### Activity timestamps — *collected, sensitive by inference*
 Every event has a timestamp. Individually harmless, but a **fine-grained timeline
 of when someone is awake, working, idle, or asleep is deeply revealing** — it's a
 map of a person's day, and it's re-identifying (your daily rhythm is close to a
 fingerprint). This is why raw events have short retention and why broader access
-is granted to *day-level* aggregates, which collapse the timeline into a summary.
+should be granted mainly to *day-level* aggregates, with only narrow latest-day
+content-free markers exposed where they directly support the clinical view.
 
 ### Behavioral patterns (in aggregate) — *the subtle one*
 Even with no name, no email, and only counts and durations, a **multi-day rhythm
@@ -55,6 +55,14 @@ needs) plus retention limits on the most granular layer.
 ### Input counts (keyboard/mouse) — *collected, low sensitivity by design*
 These are just integers per minute. There is no way to reconstruct content from a
 count, which is the entire reason I chose the count form (see §2).
+
+### Power, network, and display state — *collected, low-to-moderate sensitivity*
+These are coarse context signals: AC power present or not, battery percentage,
+network connected or not, and attached-display count. I do **not** collect SSID,
+IP address, hostnames, network traffic, display names, display serials, geometry,
+or screen contents. The value is context for interpreting activity gaps: a
+drop-off during network loss or battery drain means something different from a
+drop-off while the machine is healthy and connected.
 
 ---
 
@@ -71,10 +79,14 @@ less-invasive form?* If a less-invasive form gives the same value, I take it.
 | **App switch count** | proxy for attention fragmentation | a clinically interesting signal (fragmentation trend) | A count, not a log of *which* apps in *what* order — the count carries the fragmentation signal without the revealing sequence. |
 | **Active / idle spans** | the day's rhythm; active vs away | backbone of active/idle time and daily trend | Durations only — derived from a single system idle-time number, not from watching individual events. |
 | **Lock / unlock, sleep / wake** | session boundaries | when the person is present vs away/asleep | Transition type + timestamp only. Nothing about *why*. |
+| **Power state / battery percent** | context around availability and interruptions | helps distinguish low activity from a device/power constraint | AC yes/no and battery percent only — no charger/device identifiers. |
+| **Network state** | context around connectivity-related gaps | helps avoid overreading low engagement during disconnection | Connected yes/no only — no SSID, IP, URLs, hosts, or traffic. |
+| **Display count** | context around work setup changes | helps interpret shifts in focus/switching when external displays appear/disappear | Count only — no display identity, geometry, or screen content. |
 
-Two signals I deliberately **did not** collect at all, though the OS offers them:
-battery/network/display state ([FUTURE] — they don't change the core metrics) and
-anything about *what* woke the machine or *what* was on the lock screen.
+Signals I still deliberately **do not** collect, though the OS offers them:
+anything about *what* woke the machine, *what* was on the lock screen, network
+identity/traffic, display identity, clipboard contents, screenshots, browser
+URLs, or document/window titles.
 
 ---
 
@@ -89,8 +101,9 @@ it's enforced *in code at the point of capture*, not by a downstream filter.
   Capturing *which* keys adds nothing clinical and turns the agent into a
   keylogger recording passwords and private messages. Strictly worse on both
   axes, so it's rejected outright. In `Telemetry.swift` the keyboard monitor's
-  handler is literally `{ _ in keyboardCount += 1 }` — the event is ignored by
-  name; there is no code path that reads the key.
+  handler ignores the `NSEvent` parameter and calls `recordKeyboardActivity()`,
+  a counter method that accepts no event payload; there is no code path that
+  reads the key.
 - **Text content.** Same reasoning; there is no field anywhere in the schema to
   store it.
 - **URLs.** A URL is content (and often reveals health/financial/legal context).
@@ -99,15 +112,16 @@ it's enforced *in code at the point of capture*, not by a downstream filter.
   the agent. A screenshot is the maximal content leak — it's simply not a
   capability the system has.
 
-The exclusion is **visible and auditable**: input monitors increment a counter
-and discard the event payload in the same closure, and there is no content column
-in the database, so content cannot be persisted even by mistake.
+The exclusion is **visible and auditable**: input monitors ignore the event
+payload and call count-only methods, and there is no content column in the
+database, so content cannot be persisted even by mistake.
 
 ### What I'd tell a patient or clinician who asked what's recorded
 
 > **What is collected:** how much you use your computer, when you're active vs.
-> away, which applications you switch between, and how often — as counts and
-> durations.
+> away, which applications you switch between, coarse power/network/display
+> state, and how often activity happens — as counts, durations, and controlled
+> state numbers.
 >
 > **What is NOT collected:** the words you type, the passwords you enter, the
 > websites you visit, the contents of your screen, or images of anything you do.
@@ -137,14 +151,16 @@ Concretely, for this implementation:
   per-person baseline, and it's not derived from hardware, so it doesn't survive
   a reinstall or link across machines.
 - **Removing unnecessary metadata — what's dropped.** The riskiest field, the
-  **window title, is dropped at the source** (never captured). App names are kept
-  but treated as sensitive. Nothing is collected "just in case."
+  **window title, is dropped at the source** and rejected by the API because no
+  such field exists. App names are kept but treated as sensitive. Nothing is
+  collected "just in case."
 - **Aggregating before wider access — what stays closest to the device.** Raw
   events (the granular, re-identifying layer) stay in the store with the shortest
-  retention and the narrowest access. **Broader/clinician access is to day-level
-  aggregates** (`daily_metrics`), which collapse the revealing timeline into a
-  summary and carry far lower re-identification risk. The dashboard reads
-  aggregates almost exclusively.
+  retention and the narrowest access. **Broader/clinician access should center on
+  day-level aggregates** (`daily_metrics`), which collapse the revealing timeline
+  into a summary and carry far lower re-identification risk. This slice exposes
+  limited latest-day raw rows only for content-free app usage and timeline
+  markers.
 
 **Summary:** *hashed* = the local install id (SHA-256, on-device). *Dropped* =
 window titles, and any name/email/device identifier (never collected).
@@ -160,10 +176,16 @@ is the day-level rollup.
 - **In transit.** The agent posts JSON to the backend. Locally that's plain HTTP
   on `127.0.0.1` (nothing leaves the machine). In a real deployment this is
   **agent → backend over TLS**, no exceptions — the payload is health-adjacent.
+  Each POST is capped at 500 events, and the agent chunks larger local buffers
+  rather than sending unbounded payloads.
 - **At rest.** Telemetry should sit on a **database with encryption at rest**
   enabled (e.g. Postgres on an encrypted volume / TDE). The slice runs on local
   Postgres; the production requirement is encryption-at-rest for the telemetry
   store.
+- **Local buffering.** If the backend is unavailable, the agent retries a stable
+  chunk with the same `batch_id` and caps unsent local memory at 5,000 events.
+  Past that point it drops the oldest unsent raw events instead of accumulating
+  an unlimited local activity history.
 - **Access control (the design that's already reflected in the data model).**
   **Least privilege, with raw and aggregated access separated by role.** Raw
   `telemetry_events` is the sensitive layer — access limited to engineers/systems
@@ -204,7 +226,8 @@ is [FUTURE]; the data model already supports the operation.)
 
 ## In one sentence
 
-I collect the **rhythm** of computer use — counts, durations, app names, keyed to
-an on-device hash of a random id — and I structurally exclude its **content**;
-raw granular data lives briefly and close to the device, while clinicians see
+I collect the **rhythm** and coarse device context of computer use — counts,
+durations, app names, and controlled system-state numbers, keyed to an on-device
+hash of a random id — and I structurally exclude its **content**; raw granular
+data lives briefly and close to the device, while clinicians primarily see
 longer-lived, lower-risk day-level aggregates.
