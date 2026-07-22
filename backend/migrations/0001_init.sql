@@ -8,12 +8,16 @@
 -- device for correctness/recompute; serve pre-computed AGGREGATES to the
 -- dashboard for speed and lower privacy exposure.
 --
--- Privacy invariant enforced by the schema (PRD §1, §5): we store counts,
--- durations, app names, and switch counts -- NEVER content. There is no column
--- anywhere in this schema for keystrokes, characters, text, URLs, window titles, clipboard,
--- or screen contents. The absence of those columns is a deliberate, reviewable
--- part of the design: content cannot be persisted because there is nowhere to
--- put it.
+-- Privacy invariant (PRD §1, §5): we store counts, durations, app names, and
+-- switch counts -- NEVER content. There is no column anywhere in this schema for
+-- keystrokes, characters, text, URLs, window titles, clipboard, or screen
+-- contents. The absence of those columns is a deliberate, reviewable design
+-- choice. Note the honest limit: `app_name` is a free-text TEXT column, so this
+-- schema alone does not *prove* content exclusion -- that boundary is enforced
+-- above the DB (the agent only ever sends NSRunningApplication.localizedName,
+-- and the API validates app_name shape; see app/models.py). A short name-shaped
+-- string could still be stored here, which is why the guarantee lives in the
+-- agent, not in the column type.
 --
 -- Run:  psql "$DATABASE_URL" -f migrations/0001_init.sql
 -- =============================================================================
