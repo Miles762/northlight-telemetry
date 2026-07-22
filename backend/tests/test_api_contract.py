@@ -9,12 +9,15 @@ from pydantic import ValidationError
 from app.main import ingest_events
 from app.models import MAX_EVENTS_PER_BATCH, EventsBatch
 
+# A validly-shaped pseudonym (64 lowercase hex, as the agent's SHA-256 produces).
+SUBJECT = "a" * 64
+
 
 class ApiContractTests(unittest.TestCase):
     def test_rejects_unknown_content_fields_and_window_titles(self):
         payload = {
             "batch_id": str(uuid4()),
-            "pseudonym": "subject",
+            "pseudonym": SUBJECT,
             "events": [
                 {
                     "event_type": "keyboard",
@@ -44,7 +47,7 @@ class ApiContractTests(unittest.TestCase):
         ):
             payload = {
                 "batch_id": str(uuid4()),
-                "pseudonym": "subject",
+                "pseudonym": SUBJECT,
                 "events": [
                     {"event_type": "app_focus", "ts": ts, "numeric_value": 60,
                      "app_name": smuggled}
@@ -58,14 +61,14 @@ class ApiContractTests(unittest.TestCase):
         # keyboard/active/etc. event is malformed and rejected.
         ts = datetime.now(timezone.utc).isoformat()
         ok = EventsBatch.model_validate({
-            "batch_id": str(uuid4()), "pseudonym": "subject",
+            "batch_id": str(uuid4()), "pseudonym": SUBJECT,
             "events": [{"event_type": "app_focus", "ts": ts,
                         "numeric_value": 60, "app_name": "Safari"}],
         })
         self.assertEqual(ok.events[0].app_name, "Safari")
 
         payload = {
-            "batch_id": str(uuid4()), "pseudonym": "subject",
+            "batch_id": str(uuid4()), "pseudonym": SUBJECT,
             "events": [{"event_type": "keyboard", "ts": ts,
                         "numeric_value": 10, "app_name": "Safari"}],
         }
@@ -76,7 +79,7 @@ class ApiContractTests(unittest.TestCase):
         ts = datetime.now(timezone.utc).isoformat()
         for bad in ("A" * 65, "Sa\nfari", "Slack\t"):
             payload = {
-                "batch_id": str(uuid4()), "pseudonym": "subject",
+                "batch_id": str(uuid4()), "pseudonym": SUBJECT,
                 "events": [{"event_type": "app_focus", "ts": ts,
                             "numeric_value": 60, "app_name": bad}],
             }
@@ -92,7 +95,7 @@ class ApiContractTests(unittest.TestCase):
                       "Microsoft Word", "Google Chrome", "Slack",
                       "Adobe Acrobat", "Node.js", "Notes"):
             batch = EventsBatch.model_validate({
-                "batch_id": str(uuid4()), "pseudonym": "subject",
+                "batch_id": str(uuid4()), "pseudonym": SUBJECT,
                 "events": [{"event_type": "app_focus", "ts": ts,
                             "numeric_value": 60, "app_name": legit}],
             })
@@ -107,7 +110,7 @@ class ApiContractTests(unittest.TestCase):
                       "Re: layoffs",           # colon is not a name character
                       "notes about, the patient"):  # comma is not a name character
             payload = {
-                "batch_id": str(uuid4()), "pseudonym": "subject",
+                "batch_id": str(uuid4()), "pseudonym": SUBJECT,
                 "events": [{"event_type": "app_focus", "ts": ts,
                             "numeric_value": 60, "app_name": prose}],
             }
@@ -119,7 +122,7 @@ class ApiContractTests(unittest.TestCase):
         batch = EventsBatch.model_validate(
             {
                 "batch_id": str(uuid4()),
-                "pseudonym": "subject",
+                "pseudonym": SUBJECT,
                 "events": [
                     {"event_type": "power_ac", "ts": ts, "numeric_value": 1},
                     {"event_type": "battery_percent", "ts": ts, "numeric_value": 83},
@@ -135,7 +138,7 @@ class ApiContractTests(unittest.TestCase):
         ts = datetime.now(timezone.utc).isoformat()
         payload = {
             "batch_id": str(uuid4()),
-            "pseudonym": "subject",
+            "pseudonym": SUBJECT,
             "events": [
                 {"event_type": "keyboard", "ts": ts, "numeric_value": 1}
                 for _ in range(MAX_EVENTS_PER_BATCH + 1)
@@ -150,7 +153,7 @@ class ApiContractTests(unittest.TestCase):
         batch = EventsBatch.model_validate(
             {
                 "batch_id": str(batch_id),
-                "pseudonym": "subject",
+                "pseudonym": SUBJECT,
                 "events": [
                     {
                         "event_type": "keyboard",
@@ -172,6 +175,24 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(result.inserted_events, 0)
         self.assertEqual(result.days_aggregated, [])
         self.assertFalse(cursor.inserted_raw_events)
+
+    def test_rejects_identifier_shaped_pseudonym(self):
+        # The pseudonym must be an install-id hash (64 hex) or a labeled synthetic
+        # subject -- so a raw identity (email/name/id) cannot land in `users`.
+        ts = datetime.now(timezone.utc).isoformat()
+        events = [{"event_type": "keyboard", "ts": ts, "numeric_value": 10}]
+
+        for good in ("a" * 64, "0123456789abcdef" * 4, "synthetic-demo-001"):
+            batch = EventsBatch.model_validate({
+                "batch_id": str(uuid4()), "pseudonym": good, "events": events,
+            })
+            self.assertEqual(batch.pseudonym, good)
+
+        for bad in ("hardik@example.com", "subject", "Hardik Setia",
+                    "A" * 64, "abc", "synthetic-", "synthetic-Bad_Name"):
+            payload = {"batch_id": str(uuid4()), "pseudonym": bad, "events": events}
+            with self.assertRaises(ValidationError, msg=f"should reject {bad!r}"):
+                EventsBatch.model_validate(payload)
 
 
 class FakeConnection:

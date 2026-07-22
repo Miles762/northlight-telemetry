@@ -125,10 +125,13 @@ free-text field, `app_name`, is allowlisted to the *shape* of a real app display
 name — the name character set (letters, digits, spaces, and a few marks like
 `. - & ' ( )`), at most a few words, no domain/URL shape, and only on `app_focus`
 events — so URLs, paths, and prose sentences are rejected. I want to be honest
-about the limit of this layer: the server cannot tell a one-word app name
-(`Slack`) from a one-word secret (`hunter2`) by inspection, so it rejects
-content-*shaped* input, not every conceivable string. The real guarantee that
-only app identities arrive is the agent, not this validator. I add window titles
+about the limit of this layer: a *short* name-shaped phrase is indistinguishable
+from a real app name by inspection — the server cannot tell `Adobe Acrobat` from
+`HIV test results`, or `Slack` from a one-word secret. So this layer rejects
+content that is *shaped* like content (URLs, punctuation, sentences), not every
+conceivable short string. The real guarantee that only app identities arrive is
+the agent — which sends only `NSRunningApplication.localizedName` — not this
+validator. I add window titles
 to the never-captured list even though the
 assignment says to capture them "if available," precisely because a title is
 content-adjacent (it routinely leaks the document, page, or subject line) — the
@@ -157,8 +160,11 @@ Concretely, for this implementation:
 
 - **Pseudonymous IDs — the database keys on a `pseudonym`, never a name or
   email.** There is no `name`, `email`, `phone`, `IP`, or `device_serial` column
-  anywhere. By construction the database cannot hold a real identity — there is
-  nowhere to put one.
+  anywhere, so there is nowhere to put a real identity. And the `pseudonym` field
+  itself is validated at the API to be either a 64-char install-id hash or a
+  labeled `synthetic-` subject — an identifier-shaped value like
+  `hardik@example.com` is rejected (422), so the `users` table cannot be coaxed
+  into holding a real identity even by a client that tries.
 - **Hashing identifiers — what never leaves the device.** On first run the agent
   generates a **random UUID** and stores it in one local file. That raw UUID is
   the "local install id." It is **SHA-256 hashed on the device**, and only the

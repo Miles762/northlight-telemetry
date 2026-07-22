@@ -20,13 +20,23 @@ content-*shaped* input, not every conceivable string. The guarantee that only
 app identities arrive comes from the agent, not from this validator.
 """
 
+import re
 from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_EVENTS_PER_BATCH = 500
+
+# The pseudonym must be shaped like the two things that legitimately produce it:
+#   - the agent's SHA-256 hash of its local install id -> 64 lowercase hex chars
+#     (see Pseudonym.swift), or
+#   - a synthetic subject from the generator -> "synthetic-..." (see synthetic.py).
+# Enforcing this at the API is the counterpart to not trusting the client on any
+# other field: an email/name/raw id shaped like "hardik@example.com" is rejected
+# here, so the `users` table cannot hold a real identity even if a client tries.
+_PSEUDONYM_RE = re.compile(r"^(?:[0-9a-f]{64}|synthetic-[0-9a-z-]{1,40})$")
 
 # app_name is the only free-text field, so it is the one place a hostile or buggy
 # client could try to smuggle content (a URL, a window title, a sentence) into the
@@ -141,6 +151,20 @@ class EventsBatch(BaseModel):
     batch_id: UUID
     pseudonym: str = Field(min_length=1)
     events: list[EventIn] = Field(min_length=1, max_length=MAX_EVENTS_PER_BATCH)
+
+    @field_validator("pseudonym")
+    @classmethod
+    def _pseudonym_is_hash_or_synthetic(cls, value: str) -> str:
+        # Only accept a real install-id hash (64 hex) or a labeled synthetic
+        # subject. This is why the store cannot hold a name/email/raw id: an
+        # identifier-shaped pseudonym ("hardik@example.com") is refused here, so
+        # the "nowhere to put a real identity" claim holds at the API, not just in
+        # the schema.
+        if not _PSEUDONYM_RE.match(value):
+            raise ValueError(
+                "pseudonym must be a 64-char hex hash or a 'synthetic-' subject"
+            )
+        return value
 
 
 class IngestResult(BaseModel):
