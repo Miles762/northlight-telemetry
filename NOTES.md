@@ -428,14 +428,16 @@ days of history that a half-day exercise doesn't produce.
 
 `real-dashboard.png` (repo root) is the dashboard rendering **real telemetry
 captured from my own machine** — the agent built from source, Input Monitoring
-granted, **Start collection (consent)** pressed, then ~55 minutes of normal use.
-It shows a hashed subject (`c4ef7d2d…`, no `synthetic-` prefix), real
-focus/engagement scores from that session, real foreground app names only
-(Safari, Code, Google Chrome) — no window titles, URLs, or content — and the
-baseline panel populated from real activity.
+granted, **Start collection (consent)** pressed, then normal use over one evening
+(~19:41–20:37 EDT wall-clock, most of it idle). It shows a hashed subject
+(`c4ef7d2d…`, no `synthetic-` prefix), real focus/engagement scores, real
+foreground app names only (Safari, Code, Google Chrome) — no window titles, URLs,
+or content — and the baseline panel populated from real activity. The captured
+**active** time was **14 min on `2026-07-21` and 17 min on `2026-07-22`** (the
+summary tiles show the latest day); the rest of the window was idle.
 
-> **One honest note on the dates.** This was a single continuous evening session
-> (~19:41–20:37 EDT). It appears as two days (`2026-07-21` / `2026-07-22`) because
+> **One honest note on the dates.** This was a single continuous evening session,
+> not two separate days. It splits across `2026-07-21` / `2026-07-22` because
 > aggregation buckets by **UTC** date and the session crossed 00:00 UTC (8pm EDT).
 > That is the UTC-bucketing simplification flagged in `backend/app/aggregate.py`
 > (`_local_day`): a real deployment would bucket by the patient's local timezone.
